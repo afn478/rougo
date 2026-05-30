@@ -31,13 +31,9 @@
 
 ## 📸 Screenshots
 
-| Player & Subtitles | Dictionary Lookup | Pitch Accent Details |
+| Library | Settings | Manage Dictionaries |
 |:---:|:---:|:---:|
-| ![Player](media/screenshots/player.png) | ![Search](media/screenshots/search.png) | ![Pitch](media/screenshots/pitch.png) |
-
-| Shadowing Backlog | Waveform Analysis | Dictionary Management |
-|:---:|:---:|:---:|
-| ![Backlog](media/screenshots/backlog.png) | ![Comparison](media/screenshots/waveform.png) | ![Settings](media/screenshots/settings.png) |
+| ![Library](media/screenshots/library.png) | ![Settings](media/screenshots/settings.png) | ![Manage](media/screenshots/manage_dicts.png) |
 
 ---
 
