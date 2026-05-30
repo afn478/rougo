@@ -33,7 +33,7 @@ jobs:
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/app-release-unsigned.apk
+          files: app/build/outputs/apk/release/*.apk
           name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
