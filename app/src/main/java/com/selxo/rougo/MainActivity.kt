@@ -128,7 +128,15 @@ object VLCManager {
     fun getLibVLC(context: Context): LibVLC {
         return libVLC ?: synchronized(this) {
             libVLC ?: try {
-                LibVLC(context.applicationContext, arrayListOf("-vvv")).also { libVLC = it }
+                // Optimized for low-latency streaming and local playback
+                val options = arrayListOf(
+                    "-vvv",
+                    "--network-caching=150",
+                    "--clock-jitter=0",
+                    "--clock-synchro=0",
+                    "--file-caching=150"
+                )
+                LibVLC(context.applicationContext, options).also { libVLC = it }
             } catch (e: Exception) {
                 LibVLC(context.applicationContext).also { libVLC = it }
             }
@@ -1423,9 +1431,15 @@ fun PlayerScreen(libraryItem: LibraryItem, onBack: (LibraryItem) -> Unit) {
                             onPlayOriginal = { activeOriginalSegment = latest },
                             onPlayVoice = {
                                 try {
-                                    voiceAudioPlayer.reset(); voiceAudioPlayer.setDataSource(latest.filePath)
-                                    voiceAudioPlayer.prepare(); voiceAudioPlayer.start()
-                                } catch (e: Exception) { Toast.makeText(context, "Error playing audio", Toast.LENGTH_SHORT).show() }
+                                    voiceAudioPlayer.apply {
+                                        reset()
+                                        setDataSource(latest.filePath)
+                                        setOnPreparedListener { start() }
+                                        prepareAsync()
+                                    }
+                                } catch (e: Exception) { 
+                                    Toast.makeText(context, "Error playing audio", Toast.LENGTH_SHORT).show() 
+                                }
                             },
                             onDelete = {
                                 try { File(latest.filePath).delete() } catch (e: Exception) {}
@@ -1464,9 +1478,15 @@ fun PlayerScreen(libraryItem: LibraryItem, onBack: (LibraryItem) -> Unit) {
                             onPlayOriginal = { activeOriginalSegment = rec },
                             onPlayVoice = {
                                 try {
-                                    voiceAudioPlayer.reset(); voiceAudioPlayer.setDataSource(rec.filePath)
-                                    voiceAudioPlayer.prepare(); voiceAudioPlayer.start()
-                                } catch (e: Exception) { Toast.makeText(context, "Error playing audio", Toast.LENGTH_SHORT).show() }
+                                    voiceAudioPlayer.apply {
+                                        reset()
+                                        setDataSource(rec.filePath)
+                                        setOnPreparedListener { start() }
+                                        prepareAsync()
+                                    }
+                                } catch (e: Exception) { 
+                                    Toast.makeText(context, "Error playing audio", Toast.LENGTH_SHORT).show() 
+                                }
                             },
                             onDelete = {
                                 try { File(rec.filePath).delete() } catch (e: Exception) {}
