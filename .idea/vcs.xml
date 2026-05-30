@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts/external/glaze" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts/external/unordered_dense" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts/external/utfcpp" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts/external/xxHash" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts/external/zip" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/hoshidicts/external/zstd" vcs="Git" />
+  </component>
+</project>
