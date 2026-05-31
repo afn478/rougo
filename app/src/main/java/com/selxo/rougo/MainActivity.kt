@@ -1439,16 +1439,23 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     }
 
     var voiceCurrentPos by remember { mutableLongStateOf(-1L) }
-    LaunchedEffect(isPlaying, activeOriginalSegment, activeBothSegment) {
-        while (isPlaying || activeOriginalSegment != null || activeBothSegment != null) {
-            if (activeBothSegment != null || voiceAudioPlayer.isPlaying) {
+    // Centralized high-frequency polling for smooth waveform cursors
+    LaunchedEffect(Unit) {
+        while (true) {
+            // Update VLC (Original) position
+            if (isPlaying || activeOriginalSegment != null || activeBothSegment != null) {
+                currentPos = vlcPlayer.time
+            }
+            
+            // Update Media Player (Recorded) position
+            if (voiceAudioPlayer.isPlaying || activeBothSegment != null) {
                 voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
             } else {
                 voiceCurrentPos = -1L
             }
-            delay(33) // ~30fps for smooth cursor movement
+            
+            delay(16) // ~60fps for buttery smooth movement
         }
-        voiceCurrentPos = -1L
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -2136,7 +2143,7 @@ fun WaveformTrack(amplitudes: List<Float>, color: Color, label: String, onClick:
                 if (progress > 0f) {
                     val cursorX = size.width * progress.coerceIn(0f, 1f)
                     drawLine(
-                        color = Color.White.copy(alpha = 0.8f),
+                        color = Color(0xFFAEB2FF), // Use primary theme color for cursor
                         start = androidx.compose.ui.geometry.Offset(cursorX, 0f),
                         end = androidx.compose.ui.geometry.Offset(cursorX, size.height),
                         strokeWidth = 2.dp.toPx()
