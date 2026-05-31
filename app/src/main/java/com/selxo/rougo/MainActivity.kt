@@ -2273,11 +2273,7 @@ fun RecordingItemCard(
 
     LaunchedEffect(rec) {
         withContext(Dispatchers.IO) {
-            val originalData = if (originalMediaUri.startsWith("http")) {
-                Pair(List(40) { (0.1 + Math.random() * 0.7).toFloat() }, emptyList<Float?>())
-            } else {
-                extractAudioData(context, Uri.parse(originalMediaUri), rec.startTime, rec.endTime, 40)
-            }
+            val originalData = extractAudioData(context, Uri.parse(originalMediaUri), rec.startTime, rec.endTime, 40)
             originalAmplitudes = originalData.first
             originalPitches = originalData.second
 
