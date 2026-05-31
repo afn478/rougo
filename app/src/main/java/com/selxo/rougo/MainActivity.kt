@@ -2,6 +2,12 @@ package com.selxo.rougo
 import de.manhhao.hoshi.HoshiDicts
 import de.manhhao.hoshi.LookupResult
 import de.manhhao.hoshi.ImportResult
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import androidx.core.content.FileProvider
+import java.net.HttpURLConnection
+import java.net.URL
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -400,6 +406,82 @@ class LibraryManager(context: Context) {
     }
 }
 
+data class UpdateInfo(val tagName: String, val downloadUrl: String, val body: String)
+
+suspend fun checkForUpdates(): UpdateInfo? = withContext(Dispatchers.IO) {
+    try {
+        val url = URL("https://api.github.com/repos/kaihouguide/rougo/releases/latest")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+        
+        if (conn.responseCode == 200) {
+            val response = conn.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(response)
+            val tagName = json.getString("tag_name")
+            val assets = json.getJSONArray("assets")
+            var downloadUrl = ""
+            for (i in 0 until assets.length()) {
+                val asset = assets.getJSONObject(i)
+                if (asset.getString("name").endsWith(".apk")) {
+                    downloadUrl = asset.getString("browser_download_url")
+                    break
+                }
+            }
+            val body = json.optString("body", "")
+            if (downloadUrl.isNotEmpty()) {
+                return@withContext UpdateInfo(tagName, downloadUrl, body)
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    null
+}
+
+fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
+    val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+    val request = DownloadManager.Request(Uri.parse(downloadUrl))
+        .setTitle("Rougo Update")
+        .setDescription("Downloading latest version...")
+        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "update.apk")
+        .setAllowedOverMetered(true)
+        .setAllowedOverRoaming(true)
+
+    val downloadId = downloadManager.enqueue(request)
+
+    val onComplete = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (id == downloadId) {
+                installApk(context)
+                try { context.unregisterReceiver(this) } catch (e: Exception) {}
+            }
+        }
+    }
+    
+    val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.registerReceiver(onComplete, filter, Context.RECEIVER_EXPORTED)
+    } else {
+        context.registerReceiver(onComplete, filter)
+    }
+}
+
+fun installApk(context: Context) {
+    val file = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk")
+    if (file.exists()) {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }
+}
+
 // ==========================================
 // 2. MAIN ACTIVITY & APP FLOW
 // ==========================================
@@ -483,32 +565,48 @@ class MainActivity : ComponentActivity() {
 fun UpdateNotificationDialog() {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
     var showDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        delay(3000)
         val lastChecked = prefs.getLong("last_update_check", 0L)
-        if (System.currentTimeMillis() - lastChecked > 86400000L) {
-            showDialog = true
+        if (System.currentTimeMillis() - lastChecked > 3600000L) { // Check every hour
+            val info = checkForUpdates()
+            if (info != null) {
+                // Get current version name
+                val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                val currentVersion = pInfo.versionName
+                if (info.tagName != "v$currentVersion" && info.tagName != currentVersion) {
+                    updateInfo = info
+                    showDialog = true
+                }
+            }
+            prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply()
         }
     }
 
-    if (showDialog) {
+    if (showDialog && updateInfo != null) {
         AlertDialog(
             onDismissRequest = { showDialog = false },
-            title = { Text("Update Available", fontWeight = FontWeight.Bold) },
-            text = { Text("A new version of Rougo Reader is available. Update now to access new features, improved subtitle support, and bug fixes.") },
+            title = { Text("Update Available (${updateInfo?.tagName})", fontWeight = FontWeight.Bold) },
+            text = { 
+                Column {
+                    Text("A new version of Rougo Reader is available. Update now to access new features and bug fixes.")
+                    if (updateInfo?.body?.isNotEmpty() == true) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(updateInfo!!.body, fontSize = 12.sp, color = Color.Gray)
+                    }
+                }
+            },
             confirmButton = {
                 Button(onClick = {
                     showDialog = false
-                    prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply()
-                    Toast.makeText(context, "Downloading update...", Toast.LENGTH_SHORT).show()
+                    downloadAndInstallUpdate(context, updateInfo!!.downloadUrl)
                 }) { Text("Update Now") }
             },
             dismissButton = {
                 TextButton(onClick = {
                     showDialog = false
-                    prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply()
                 }) { Text("Later") }
             }
         )
