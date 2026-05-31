@@ -87,6 +87,8 @@ import java.util.UUID
 
 // --- YT-DLP IMPORTS ---
 import com.yausername.ffmpeg.FFmpeg
+import com.yausername.ffmpeg.execute
+import com.yausername.ffmpeg.RETURN_CODE_SUCCESS
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.youtubedl_android.mapper.VideoFormat
@@ -2493,12 +2495,9 @@ fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: L
                 tempWav.absolutePath
             ))
 
-            val request = YoutubeDLRequest("").apply {
-                addCommands(cmd)
-            }
-            val response = YoutubeDL.getInstance().execute(request)
-            val rc = response.exitCode
-            if (rc == 0 && tempWav.exists()) {
+            val rc = FFmpeg.getInstance().execute(cmd.toTypedArray())
+
+            if (rc == com.yausername.ffmpeg.FFmpeg.RETURN_CODE_SUCCESS && tempWav.exists()) {
                 val bytes = tempWav.readBytes()
                 if (bytes.size > 44) {
                     pcmDataBytes = bytes.copyOfRange(44, bytes.size)
