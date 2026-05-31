@@ -1437,6 +1437,19 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         if (!isGranted) Toast.makeText(context, "Mic required!", Toast.LENGTH_SHORT).show()
     }
 
+    var voiceCurrentPos by remember { mutableLongStateOf(-1L) }
+    LaunchedEffect(isPlaying, activeOriginalSegment, activeBothSegment) {
+        while (isPlaying || activeOriginalSegment != null || activeBothSegment != null) {
+            if (activeBothSegment != null || voiceAudioPlayer.isPlaying) {
+                voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
+            } else {
+                voiceCurrentPos = -1L
+            }
+            delay(33) // ~30fps for smooth cursor movement
+        }
+        voiceCurrentPos = -1L
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
 
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1679,7 +1692,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                 recordings.remove(latest)
                                 syncWithStorage()
                             },
-                            onShare = { exportRecording(context, File(latest.filePath)) }
+                            onShare = { exportRecording(context, File(latest.filePath)) },
+                            currentOriginalTime = currentPos,
+                            currentRecordedTime = voiceCurrentPos
                         )
                     }
                 }
@@ -1730,7 +1745,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                 recordings.remove(rec)
                                 syncWithStorage()
                             },
-                            onShare = { exportRecording(context, File(rec.filePath)) }
+                            onShare = { exportRecording(context, File(rec.filePath)) },
+                            currentOriginalTime = currentPos,
+                            currentRecordedTime = voiceCurrentPos
                         )
                     }
                 }
@@ -2065,17 +2082,19 @@ fun AudioWaveformComparison(
     recordedAmplitudes: List<Float>,
     onPlayOriginal: () -> Unit,
     onPlayVoice: () -> Unit,
+    originalProgress: Float = 0f,
+    recordedProgress: Float = 0f,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxWidth().background(Color(0xFF1E1E24), RoundedCornerShape(8.dp)).padding(8.dp)) {
-        WaveformTrack(amplitudes = originalAmplitudes, color = Color(0xFF5E5CE6), label = "Original", onClick = onPlayOriginal)
+        WaveformTrack(amplitudes = originalAmplitudes, color = Color(0xFF5E5CE6), label = "Original", onClick = onPlayOriginal, progress = originalProgress)
         Spacer(Modifier.height(8.dp))
-        WaveformTrack(amplitudes = recordedAmplitudes, color = Color(0xFF8E8E93), label = "Recorded", onClick = onPlayVoice)
+        WaveformTrack(amplitudes = recordedAmplitudes, color = Color(0xFF8E8E93), label = "Recorded", onClick = onPlayVoice, progress = recordedProgress)
     }
 }
 
 @Composable
-fun WaveformTrack(amplitudes: List<Float>, color: Color, label: String, onClick: () -> Unit) {
+fun WaveformTrack(amplitudes: List<Float>, color: Color, label: String, onClick: () -> Unit, progress: Float = 0f) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(48.dp)) {
         Box(
             modifier = Modifier
@@ -2103,6 +2122,16 @@ fun WaveformTrack(amplitudes: List<Float>, color: Color, label: String, onClick:
                     }
                 }
                 drawPath(path = path, color = color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
+
+                if (progress > 0f) {
+                    val cursorX = size.width * progress.coerceIn(0f, 1f)
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.8f),
+                        start = androidx.compose.ui.geometry.Offset(cursorX, 0f),
+                        end = androidx.compose.ui.geometry.Offset(cursorX, size.height),
+                        strokeWidth = 2.dp.toPx()
+                    )
+                }
             }
         }
     }
@@ -2154,7 +2183,9 @@ fun RecordingItemCard(
     onPlayVoice: () -> Unit,
     onPlayBoth: () -> Unit,
     onDelete: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    currentOriginalTime: Long = -1L,
+    currentRecordedTime: Long = -1L
 ) {
     var originalAmplitudes by remember { mutableStateOf<List<Float>>(emptyList()) }
     var recordedAmplitudes by remember { mutableStateOf<List<Float>>(emptyList()) }
@@ -2169,6 +2200,14 @@ fun RecordingItemCard(
             recordedAmplitudes = extractAudioAmplitudes(context, Uri.fromFile(File(rec.filePath)), 0, rec.endTime - rec.startTime, 40)
         }
     }
+
+    val originalProgress = if (currentOriginalTime in rec.startTime..rec.endTime) {
+        (currentOriginalTime - rec.startTime).toFloat() / (rec.endTime - rec.startTime).toFloat()
+    } else 0f
+
+    val recordedProgress = if (currentRecordedTime >= 0) {
+        currentRecordedTime.toFloat() / (rec.endTime - rec.startTime).toFloat()
+    } else 0f
 
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp).fillMaxWidth()) {
@@ -2191,7 +2230,9 @@ fun RecordingItemCard(
                 originalAmplitudes = originalAmplitudes,
                 recordedAmplitudes = recordedAmplitudes,
                 onPlayOriginal = onPlayOriginal,
-                onPlayVoice = onPlayVoice
+                onPlayVoice = onPlayVoice,
+                originalProgress = originalProgress,
+                recordedProgress = recordedProgress
             )
 
             Spacer(modifier = Modifier.height(12.dp))
