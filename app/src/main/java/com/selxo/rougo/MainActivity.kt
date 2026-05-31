@@ -561,6 +561,27 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+fun isNewerVersion(remoteTag: String, currentVersion: String?): Boolean {
+    if (currentVersion == null) return true
+    
+    val remote = remoteTag.removePrefix("v").trim()
+    val local = currentVersion.removePrefix("v").trim()
+    
+    if (remote == local) return false
+    
+    val remoteParts = remote.split(".").mapNotNull { it.toIntOrNull() }
+    val localParts = local.split(".").mapNotNull { it.toIntOrNull() }
+    
+    val maxLength = maxOf(remoteParts.size, localParts.size)
+    for (i in 0 until maxLength) {
+        val r = remoteParts.getOrElse(i) { 0 }
+        val l = localParts.getOrElse(i) { 0 }
+        if (r > l) return true
+        if (r < l) return false
+    }
+    return false
+}
+
 @Composable
 fun UpdateNotificationDialog() {
     val context = LocalContext.current
@@ -576,7 +597,7 @@ fun UpdateNotificationDialog() {
                 // Get current version name
                 val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
                 val currentVersion = pInfo.versionName
-                if (info.tagName != "v$currentVersion" && info.tagName != currentVersion) {
+                if (isNewerVersion(info.tagName, currentVersion)) {
                     updateInfo = info
                     showDialog = true
                 }
