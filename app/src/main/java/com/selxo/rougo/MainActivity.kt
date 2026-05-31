@@ -78,7 +78,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 import java.util.UUID
 
@@ -104,7 +107,7 @@ data class DictEntry(
     val term: String,
     val deinflected: String,
     val reading: String,
-    val definition: String,   // HTML or structured glossary
+    val definition: String,
     val dictName: String,
     val pitchPositions: List<PitchInfo> = emptyList()
 )
@@ -284,12 +287,10 @@ class DictionaryEngine private constructor(private val context: Context) {
         }
     }
 
-    @Suppress("unused")
     fun getInstalledDictionaries(): List<String> {
         return dictsDir.listFiles()?.filter { it.isDirectory }?.map { it.name } ?: emptyList()
     }
 
-    @Suppress("unused")
     fun deleteDict(name: String) {
         File(dictsDir, name).deleteRecursively()
         loadDictionaries()
@@ -414,7 +415,7 @@ suspend fun checkForUpdates(): UpdateInfo? = withContext(Dispatchers.IO) {
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
         conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
-        
+
         if (conn.responseCode == 200) {
             val response = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(response)
@@ -460,7 +461,7 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
             }
         }
     }
-    
+
     val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         context.registerReceiver(onComplete, filter, Context.RECEIVER_EXPORTED)
@@ -563,15 +564,15 @@ class MainActivity : ComponentActivity() {
 
 fun isNewerVersion(remoteTag: String, currentVersion: String?): Boolean {
     if (currentVersion == null) return true
-    
+
     val remote = remoteTag.removePrefix("v").trim()
     val local = currentVersion.removePrefix("v").trim()
-    
+
     if (remote == local) return false
-    
+
     val remoteParts = remote.split(".").mapNotNull { it.toIntOrNull() }
     val localParts = local.split(".").mapNotNull { it.toIntOrNull() }
-    
+
     val maxLength = maxOf(remoteParts.size, localParts.size)
     for (i in 0 until maxLength) {
         val r = remoteParts.getOrElse(i) { 0 }
@@ -594,7 +595,6 @@ fun UpdateNotificationDialog() {
         if (System.currentTimeMillis() - lastChecked > 3600000L) { // Check every hour
             val info = checkForUpdates()
             if (info != null) {
-                // Get current version name
                 val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
                 val currentVersion = pInfo.versionName
                 if (isNewerVersion(info.tagName, currentVersion)) {
@@ -610,7 +610,7 @@ fun UpdateNotificationDialog() {
         AlertDialog(
             onDismissRequest = { showDialog = false },
             title = { Text("Update Available (${updateInfo?.tagName})", fontWeight = FontWeight.Bold) },
-            text = { 
+            text = {
                 Column {
                     Text("A new version of Rougo Reader is available. Update now to access new features and bug fixes.")
                     if (updateInfo?.body?.isNotEmpty() == true) {
@@ -1035,7 +1035,7 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToDictionaries: () -> Unit) {
                     Spacer(Modifier.width(16.dp))
                     Column {
                         Text("Version", fontWeight = FontWeight.Bold, color = Color.White)
-                        Text("1.0.0 (Rougo Reader)", color = Color.Gray, fontSize = 12.sp)
+                        Text("1.0.2 (Rougo Reader)", color = Color.Gray, fontSize = 12.sp)
                     }
                 }
             }
@@ -1439,22 +1439,19 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     }
 
     var voiceCurrentPos by remember { mutableLongStateOf(-1L) }
-    // Centralized high-frequency polling for smooth waveform cursors
     LaunchedEffect(Unit) {
         while (true) {
-            // Update VLC (Original) position
             if (isPlaying || activeOriginalSegment != null || activeBothSegment != null) {
                 currentPos = vlcPlayer.time
             }
-            
-            // Update Media Player (Recorded) position
+
             if (voiceAudioPlayer.isPlaying || activeBothSegment != null) {
                 voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
             } else {
                 voiceCurrentPos = -1L
             }
-            
-            delay(16) // ~60fps for buttery smooth movement
+
+            delay(16)
         }
     }
 
@@ -1597,7 +1594,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { vlcPlayer.time = (currentPos - 5000).coerceAtLeast(0) }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.FastRewind, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp)) }
-                        Box(modifier = Modifier.size(52.dp).clip(CircleShape).background(if (isRefreshingStream) Color.DarkGray else MaterialTheme.colorScheme.primary).clickable(enabled = !isRefreshingStream) { 
+                        Box(modifier = Modifier.size(52.dp).clip(CircleShape).background(if (isRefreshingStream) Color.DarkGray else MaterialTheme.colorScheme.primary).clickable(enabled = !isRefreshingStream) {
                             if (isPlaying) {
                                 vlcPlayer.pause()
                             } else {
@@ -1706,6 +1703,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onPlayBoth = { activeBothSegment = latest },
                             onDelete = {
                                 try { File(latest.filePath).delete() } catch (e: Exception) {}
+                                try { File(context.cacheDir, "orig_${latest.id}.m4a").delete() } catch (e: Exception) {}
                                 recordings.remove(latest)
                                 syncWithStorage()
                             },
@@ -1759,6 +1757,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onPlayBoth = { activeBothSegment = rec },
                             onDelete = {
                                 try { File(rec.filePath).delete() } catch (e: Exception) {}
+                                try { File(context.cacheDir, "orig_${rec.id}.m4a").delete() } catch (e: Exception) {}
                                 recordings.remove(rec)
                                 syncWithStorage()
                             },
@@ -1870,7 +1869,7 @@ fun PitchDiagram(reading: String, pitchPosition: Int, modifier: Modifier = Modif
     val textColor = Color.White
     val dotRadius = 4.dp
     val strokeWidth = 2.dp
-    val moraWidth = 32.dp // Increased from 24.dp to prevent wrapping for morae like "しゅ"
+    val moraWidth = 32.dp
 
     Column(modifier = modifier, horizontalAlignment = Alignment.Start) {
         androidx.compose.foundation.Canvas(
@@ -2158,33 +2157,36 @@ fun WaveformTrack(
             val step = size.width / amplitudes.size
             val midY = size.height / 2
 
+            // Draw Symmetrical Amplitudes Bars
             if (amplitudes.isNotEmpty()) {
-                val points = amplitudes.mapIndexed { index, amp ->
-                    androidx.compose.ui.geometry.Offset(index * step, midY - (amp * midY))
-                }
+                val barWidth = (step * 0.7f).coerceAtLeast(2f)
+                for (i in amplitudes.indices) {
+                    val amp = amplitudes[i]
+                    val x = i * step + step / 2f
+                    val barHeight = (amp * size.height).coerceAtLeast(4f)
 
-                val path = androidx.compose.ui.graphics.Path()
-                if (points.isNotEmpty()) {
-                    path.moveTo(points[0].x, points[0].y)
-                    for (i in 1 until points.size) {
-                        path.lineTo(points[i].x, points[i].y)
-                    }
+                    drawLine(
+                        color = color.copy(alpha = 0.8f),
+                        start = androidx.compose.ui.geometry.Offset(x, midY - barHeight / 2f),
+                        end = androidx.compose.ui.geometry.Offset(x, midY + barHeight / 2f),
+                        strokeWidth = barWidth,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
                 }
-                drawPath(path = path, color = color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
             }
 
-            // Draw Pitch Contour
+            // Draw Smooth Pitch Contour
             if (pitches != null && pitches.isNotEmpty()) {
                 val pitchPath = androidx.compose.ui.graphics.Path()
                 var isFirst = true
-                val minHz = 75f
+                val minHz = 70f
                 val maxHz = 500f
 
                 pitches.forEachIndexed { index, pitchHz ->
                     if (pitchHz != null && pitchHz in minHz..maxHz) {
                         val normalizedY = 1f - ((pitchHz - minHz) / (maxHz - minHz)).coerceIn(0f, 1f)
                         val y = normalizedY * size.height
-                        val x = index * step
+                        val x = index * step + step / 2f
 
                         if (isFirst) {
                             pitchPath.moveTo(x, y)
@@ -2199,14 +2201,18 @@ fun WaveformTrack(
                 drawPath(
                     path = pitchPath,
                     color = Color(0xFF00E5FF),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.5.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 2.5.dp.toPx(),
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        join = androidx.compose.ui.graphics.StrokeJoin.Round
+                    )
                 )
             }
 
             if (progress > 0f) {
                 val cursorX = size.width * progress.coerceIn(0f, 1f)
                 drawLine(
-                    color = Color(0xFFAEB2FF), // Use primary theme color for cursor
+                    color = Color(0xFFAEB2FF),
                     start = androidx.compose.ui.geometry.Offset(cursorX, 0f),
                     end = androidx.compose.ui.geometry.Offset(cursorX, size.height),
                     strokeWidth = 2.dp.toPx()
@@ -2271,8 +2277,9 @@ fun RecordingItemCard(
     var recordedAmplitudes by remember { mutableStateOf<List<Float>>(emptyList()) }
     var recordedPitches by remember { mutableStateOf<List<Float?>>(emptyList()) }
 
-    LaunchedEffect(rec) {
+    LaunchedEffect(rec, originalMediaUri) {
         withContext(Dispatchers.IO) {
+            // Real extraction without local caching of segment (MediaExtractor handles remote streaming)
             val originalData = extractAudioData(context, Uri.parse(originalMediaUri), rec.startTime, rec.endTime, 40)
             originalAmplitudes = originalData.first
             originalPitches = originalData.second
@@ -2337,7 +2344,7 @@ fun RecordingItemCard(
 fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: Long, buckets: Int): Pair<List<Float>, List<Float?>> {
     val resultAmps = MutableList(buckets) { 0.05f }
     val resultPitches = MutableList<Float?>(buckets) { null }
-    
+
     try {
         val extractor = android.media.MediaExtractor()
         if (uri.scheme == "content") {
@@ -2359,6 +2366,7 @@ fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: L
                 break
             }
         }
+
         if (audioTrackIndex < 0) {
             extractor.release()
             return Pair(resultAmps, resultPitches)
@@ -2368,81 +2376,58 @@ fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: L
         val format = extractor.getTrackFormat(audioTrackIndex)
         val mime = format.getString(android.media.MediaFormat.KEY_MIME)!!
         val sampleRate = format.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
-        
-        // SAFELY EXTRACT CHANNEL COUNT (Default to 1 if missing)
         val channelCount = if (format.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)) {
             format.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
         } else 1
-        
+
         val codec = android.media.MediaCodec.createDecoderByType(mime)
         codec.configure(format, null, null, 0)
         codec.start()
 
-        extractor.seekTo(startTimeMs * 1000, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+        val startUs = startTimeMs * 1000L
+        val endUs = endTimeMs * 1000L
 
-        val durationMs = if (endTimeMs > startTimeMs) endTimeMs - startTimeMs else {
-            val fileDurationUs = format.getLong(android.media.MediaFormat.KEY_DURATION)
-            (fileDurationUs / 1000).takeIf { it > 0 } ?: 10000L
+        if (startUs > 0) {
+            extractor.seekTo(startUs, android.media.MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         }
-
-        val bucketDurationUs = (durationMs * 1000) / buckets
-        val bucketAmps = FloatArray(buckets)
-        val bucketPitches = MutableList<Float?>(buckets) { null }
 
         val info = android.media.MediaCodec.BufferInfo()
         var isEOS = false
-        var maxGlobalAmp = 1f
+        val pcmData = ByteArrayOutputStream()
 
         while (!isEOS) {
-            val inIndex = codec.dequeueInputBuffer(5000)
+            val inIndex = codec.dequeueInputBuffer(10000)
             if (inIndex >= 0) {
                 val buffer = codec.getInputBuffer(inIndex)!!
                 val sampleSize = extractor.readSampleData(buffer, 0)
-                if (sampleSize < 0 || (endTimeMs > 0 && extractor.sampleTime > endTimeMs * 1000)) {
+                val sampleTimeUs = extractor.sampleTime
+
+                if (sampleSize < 0 || (endUs > 0 && sampleTimeUs > endUs)) {
                     codec.queueInputBuffer(inIndex, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                     isEOS = true
                 } else {
-                    codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
+                    codec.queueInputBuffer(inIndex, 0, sampleSize, sampleTimeUs, 0)
                     extractor.advance()
                 }
             }
 
-            var outIndex = codec.dequeueOutputBuffer(info, 5000)
+            var outIndex = codec.dequeueOutputBuffer(info, 10000)
             while (outIndex >= 0) {
                 if (info.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                     isEOS = true
                 }
                 if (info.size > 0) {
-                    val chunkTimeUs = info.presentationTimeUs - (startTimeMs * 1000)
-                    if (chunkTimeUs >= 0) {
-                        val bucketIdx = (chunkTimeUs / bucketDurationUs).toInt().coerceIn(0, buckets - 1)
-
+                    if (info.presentationTimeUs >= startUs && (endUs == 0L || info.presentationTimeUs <= endUs)) {
                         val outBuffer = codec.getOutputBuffer(outIndex)!!
                         outBuffer.position(info.offset)
                         outBuffer.limit(info.offset + info.size)
-
-                        val shortBuffer = outBuffer.asShortBuffer()
-                        val samples = ShortArray(shortBuffer.remaining())
-                        shortBuffer.get(samples)
-                        
-                        var localMax = 0
-                        for (sample in samples) {
-                            val abs = kotlin.math.abs(sample.toInt())
-                            if (abs > localMax) localMax = abs
-                        }
-
-                        if (localMax > bucketAmps[bucketIdx]) {
-                            bucketAmps[bucketIdx] = localMax.toFloat()
-                            if (localMax > maxGlobalAmp) maxGlobalAmp = localMax.toFloat()
-                            
-                            // PASS CHANNEL COUNT TO PITCH ESTIMATOR
-                            val pitch = estimatePitch(samples, sampleRate, channelCount)
-                            if (pitch != null) bucketPitches[bucketIdx] = pitch
-                        }
+                        val chunk = ByteArray(info.size)
+                        outBuffer.get(chunk)
+                        pcmData.write(chunk)
                     }
                 }
                 codec.releaseOutputBuffer(outIndex, false)
-                outIndex = codec.dequeueOutputBuffer(info, 5000)
+                outIndex = codec.dequeueOutputBuffer(info, 10000)
             }
         }
 
@@ -2450,10 +2435,63 @@ fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: L
         codec.release()
         extractor.release()
 
+        val byteData = pcmData.toByteArray()
+        if (byteData.isEmpty()) return Pair(resultAmps, resultPitches)
+
+        val shortBuffer = ByteBuffer.wrap(byteData).order(ByteOrder.nativeOrder()).asShortBuffer()
+        val allSamples = ShortArray(shortBuffer.remaining())
+        shortBuffer.get(allSamples)
+
+        val monoSamples = if (channelCount > 1) {
+            val mono = ShortArray(allSamples.size / channelCount)
+            for (i in mono.indices) mono[i] = allSamples[i * channelCount]
+            mono
+        } else allSamples
+
+        val samplesPerBucket = monoSamples.size / buckets
+        if (samplesPerBucket == 0) return Pair(resultAmps, resultPitches)
+
+        var maxGlobalAmp = 0f
+        val bucketAmps = FloatArray(buckets)
+
         for (i in 0 until buckets) {
-            resultAmps[i] = (bucketAmps[i] / maxGlobalAmp).coerceIn(0.05f, 1f)
-            resultPitches[i] = bucketPitches[i]
+            val startIndex = i * samplesPerBucket
+            val endIndex = if (i == buckets - 1) monoSamples.size else startIndex + samplesPerBucket
+
+            val length = endIndex - startIndex
+            var sumSq = 0.0
+            for (j in startIndex until endIndex) {
+                val s = monoSamples[j].toDouble()
+                sumSq += s * s
+            }
+
+            val rms = if (length > 0) Math.sqrt(sumSq / length).toFloat() else 0f
+            bucketAmps[i] = rms
+            if (rms > maxGlobalAmp) maxGlobalAmp = rms
+
+            val bucketSamples = monoSamples.copyOfRange(startIndex, endIndex)
+            resultPitches[i] = estimatePitch(bucketSamples, sampleRate, 1)
         }
+
+        val smoothedPitches = MutableList<Float?>(buckets) { null }
+        for (i in 0 until buckets) {
+            val window = mutableListOf<Float>()
+            for (j in i - 2..i + 2) {
+                if (j in 0 until buckets) {
+                    resultPitches[j]?.let { window.add(it) }
+                }
+            }
+            if (window.isNotEmpty()) {
+                window.sort()
+                smoothedPitches[i] = window[window.size / 2]
+            }
+        }
+
+        for (i in 0 until buckets) {
+            resultAmps[i] = if (maxGlobalAmp > 0) (bucketAmps[i] / maxGlobalAmp).coerceIn(0.05f, 1f) else 0.05f
+            resultPitches[i] = smoothedPitches[i]
+        }
+
     } catch (e: Exception) {
         e.printStackTrace()
     }
@@ -2462,8 +2500,7 @@ fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: L
 
 fun estimatePitch(samples: ShortArray, sampleRate: Int, channels: Int = 1): Float? {
     if (samples.isEmpty()) return null
-    
-    // De-interleave Stereo to Mono (take every Nth sample)
+
     val monoSamples = if (channels > 1) {
         val mono = ShortArray(samples.size / channels)
         for (i in mono.indices) {
@@ -2473,32 +2510,15 @@ fun estimatePitch(samples: ShortArray, sampleRate: Int, channels: Int = 1): Floa
     } else {
         samples
     }
-    
-    val minPitch = 70   
-    val maxPitch = 500  
-    
+
+    val minPitch = 70
+    val maxPitch = 500
+
     val maxPeriod = sampleRate / minPitch
     val minPeriod = sampleRate / maxPitch
-    
+
     if (monoSamples.size < maxPeriod) return null
-    
-    var minDiff = Float.MAX_VALUE
-    var bestPeriod = -1
-    
-    for (period in minPeriod..maxPeriod) {
-        var diff = 0f
-        for (i in 0 until monoSamples.size - period) {
-            diff += kotlin.math.abs(monoSamples[i].toInt() - monoSamples[i + period].toInt())
-        }
-        diff /= (monoSamples.size - period)
-        
-        if (diff < minDiff) {
-            minDiff = diff
-            bestPeriod = period
-        }
-    }
-    
-    // CALCULATE RMS USING PRIMITIVES (DO NOT USE .map {})
+
     var sumSq = 0.0
     for (s in monoSamples) {
         val v = s.toDouble()
@@ -2506,8 +2526,24 @@ fun estimatePitch(samples: ShortArray, sampleRate: Int, channels: Int = 1): Floa
     }
     val rms = Math.sqrt(sumSq / monoSamples.size).toFloat()
 
-    if (rms < 500f) return null 
-    
+    if (rms < 50f) return null
+
+    var minDiff = Float.MAX_VALUE
+    var bestPeriod = -1
+
+    for (period in minPeriod..maxPeriod) {
+        var diff = 0f
+        for (i in 0 until monoSamples.size - period) {
+            diff += kotlin.math.abs(monoSamples[i].toInt() - monoSamples[i + period].toInt())
+        }
+        diff /= (monoSamples.size - period)
+
+        if (diff < minDiff) {
+            minDiff = diff
+            bestPeriod = period
+        }
+    }
+
     return if (bestPeriod > 0) sampleRate.toFloat() / bestPeriod else null
 }
 
