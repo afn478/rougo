@@ -19,3 +19,9 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# JNI-backed and process-wrapper libraries use reflection/native entry points.
+-keep class org.videolan.libvlc.** { *; }
+-keep class org.videolan.libvlc.util.** { *; }
+-keep class com.yausername.youtubedl_android.** { *; }
+-keep class com.yausername.ffmpeg.** { *; }

@@ -10,17 +10,63 @@ import java.io.File
 fun FFmpeg.execute(commands: Array<String>): Int {
     return try {
         val ytdl = YoutubeDL.getInstance()
-        // Accessing private ffmpegPath via reflection as it's correctly set during YoutubeDL.init()
-        val ffmpegPathField = ytdl.javaClass.getDeclaredField("ffmpegPath")
-        ffmpegPathField.isAccessible = true
-        val ffmpegPathFile = ffmpegPathField.get(ytdl) as? File ?: return -1
-        val ffmpegPath = ffmpegPathFile.absolutePath
-        
-        val process = Runtime.getRuntime().exec(arrayOf(ffmpegPath) + commands)
-        process.waitFor()
+        val ffmpegPath = reflectedFile(ytdl, "ffmpegPath")?.absolutePath ?: return -1
+
+        val processBuilder = ProcessBuilder(mutableListOf(ffmpegPath).apply { addAll(commands) })
+            .redirectErrorStream(true)
+
+        reflectedString(ytdl, "ENV_LD_LIBRARY_PATH")?.takeIf { it.isNotBlank() }?.let {
+            processBuilder.environment()["LD_LIBRARY_PATH"] = it
+        }
+        reflectedString(ytdl, "TMPDIR")?.takeIf { it.isNotBlank() }?.let {
+            processBuilder.environment()["TMPDIR"] = it
+        }
+        reflectedFile(ytdl, "binDir")?.absolutePath?.let { binDir ->
+            val currentPath = processBuilder.environment()["PATH"].orEmpty()
+            processBuilder.environment()["PATH"] = if (currentPath.isBlank()) binDir else "$currentPath:$binDir"
+        }
+
+        val process = processBuilder.start()
+        val outputDrain = Thread {
+            try {
+                process.inputStream.use { input ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (input.read(buffer) >= 0) {
+                        // Drain ffmpeg output so the process cannot block on a full pipe.
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        outputDrain.start()
+
+        val exitCode = process.waitFor()
+        outputDrain.join(1000)
+        exitCode
     } catch (e: Exception) {
         e.printStackTrace()
         -1
+    }
+}
+
+private fun reflectedFile(instance: Any, fieldName: String): File? {
+    return try {
+        val field = instance.javaClass.getDeclaredField(fieldName)
+        field.isAccessible = true
+        field.get(instance) as? File
+    } catch (e: Exception) {
+        null
+    }
+}
+
+private fun reflectedString(instance: Any, fieldName: String): String? {
+    return try {
+        val field = instance.javaClass.getDeclaredField(fieldName)
+        field.isAccessible = true
+        field.get(instance) as? String
+    } catch (e: Exception) {
+        null
     }
 }
 

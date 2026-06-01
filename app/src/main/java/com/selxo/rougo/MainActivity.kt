@@ -3,6 +3,9 @@ import de.manhhao.hoshi.HoshiDicts
 import de.manhhao.hoshi.LookupResult
 import de.manhhao.hoshi.ImportResult
 import android.app.DownloadManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import androidx.core.content.FileProvider
@@ -36,13 +39,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -63,6 +71,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
@@ -84,15 +94,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.roundToInt
 
 // --- YT-DLP IMPORTS ---
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.ffmpeg.execute
-import com.yausername.ffmpeg.RETURN_CODE_SUCCESS
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
-import com.yausername.youtubedl_android.mapper.VideoFormat
-import com.yausername.youtubedl_android.mapper.VideoInfo
 
 // --- IMPORT ALIASES ---
 import android.media.MediaPlayer as AndroidMediaPlayer
@@ -134,6 +142,23 @@ object ImageCache {
     val cache = java.util.concurrent.ConcurrentHashMap<String, ImageBitmap>()
 }
 
+object WaveformCache {
+    private const val MAX_ITEMS = 80
+    private val cache = object : LinkedHashMap<String, Pair<List<Float>, List<Float?>>>(MAX_ITEMS, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<List<Float>, List<Float?>>>?): Boolean {
+            return size > MAX_ITEMS
+        }
+    }
+
+    @Synchronized
+    fun get(key: String): Pair<List<Float>, List<Float?>>? = cache[key]
+
+    @Synchronized
+    fun put(key: String, value: Pair<List<Float>, List<Float?>>) {
+        cache[key] = value
+    }
+}
+
 object VLCManager {
     @Volatile
     private var libVLC: LibVLC? = null
@@ -142,17 +167,311 @@ object VLCManager {
         return libVLC ?: synchronized(this) {
             libVLC ?: try {
                 val options = arrayListOf(
-                    "-vvv",
-                    "--network-caching=150",
+                    "--verbose=0",
+                    "--network-caching=800",
                     "--clock-jitter=0",
                     "--clock-synchro=0",
-                    "--file-caching=150"
+                    "--file-caching=300"
                 )
                 LibVLC(context.applicationContext, options).also { libVLC = it }
             } catch (e: Exception) {
                 LibVLC(context.applicationContext).also { libVLC = it }
             }
         }
+    }
+}
+
+private class ShadowAudioRecorder(private val noiseCancellationEnabled: Boolean) {
+    private var audioRecord: android.media.AudioRecord? = null
+    private var encoder: android.media.MediaCodec? = null
+    private var muxer: android.media.MediaMuxer? = null
+    private var recordingThread: Thread? = null
+    private var outputFile: File? = null
+    private var trackIndex = -1
+    private var muxerStarted = false
+    private var wroteSamples = false
+
+    private var noiseSuppressor: android.media.audiofx.NoiseSuppressor? = null
+    private var echoCanceler: android.media.audiofx.AcousticEchoCanceler? = null
+    private var gainControl: android.media.audiofx.AutomaticGainControl? = null
+
+    @Volatile
+    private var shouldRecord = false
+
+    @Volatile
+    private var threadFailed = false
+
+    fun start(file: File): Boolean {
+        release()
+        val sources = buildList {
+            if (noiseCancellationEnabled) {
+                add(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                add(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                add(MediaRecorder.AudioSource.MIC)
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) add(MediaRecorder.AudioSource.UNPROCESSED)
+                add(MediaRecorder.AudioSource.MIC)
+                add(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            }
+        }.distinct()
+
+        for (source in sources) {
+            try { file.delete() } catch (e: Exception) {}
+            if (startWithSource(file, source)) return true
+            release()
+        }
+
+        try { file.delete() } catch (e: Exception) {}
+        return false
+    }
+
+    fun stop(): Boolean {
+        shouldRecord = false
+        try { audioRecord?.stop() } catch (e: Exception) {}
+
+        val thread = recordingThread
+        if (thread != null && thread.isAlive) {
+            try {
+                thread.join(5000)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                threadFailed = true
+            }
+            if (thread.isAlive) threadFailed = true
+        }
+
+        val success = !threadFailed && wroteSamples && (outputFile?.length() ?: 0L) > 0L
+        release()
+        return success
+    }
+
+    fun release() {
+        shouldRecord = false
+        releaseEffect(gainControl)
+        releaseEffect(echoCanceler)
+        releaseEffect(noiseSuppressor)
+        gainControl = null
+        echoCanceler = null
+        noiseSuppressor = null
+
+        try { audioRecord?.stop() } catch (e: Exception) {}
+        try { audioRecord?.release() } catch (e: Exception) {}
+        audioRecord = null
+
+        try { encoder?.stop() } catch (e: Exception) {}
+        try { encoder?.release() } catch (e: Exception) {}
+        encoder = null
+
+        try {
+            if (muxerStarted && wroteSamples) muxer?.stop()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        try { muxer?.release() } catch (e: Exception) {}
+        muxer = null
+
+        recordingThread = null
+        outputFile = null
+        trackIndex = -1
+        muxerStarted = false
+        wroteSamples = false
+    }
+
+    private fun startWithSource(file: File, source: Int): Boolean {
+        val minBuffer = android.media.AudioRecord.getMinBufferSize(
+            RECORD_SAMPLE_RATE,
+            android.media.AudioFormat.CHANNEL_IN_MONO,
+            android.media.AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (minBuffer <= 0) return false
+
+        val pcmBufferSize = maxOf(minBuffer * 2, RECORD_SAMPLE_RATE / 5 * RECORD_BYTES_PER_FRAME)
+        return try {
+            val recorder = createAudioRecord(source, pcmBufferSize)
+            if (recorder.state != android.media.AudioRecord.STATE_INITIALIZED) {
+                recorder.release()
+                return false
+            }
+
+            audioRecord = recorder
+            if (noiseCancellationEnabled) attachVoiceEffects(recorder.audioSessionId)
+
+            val format = android.media.MediaFormat.createAudioFormat(
+                android.media.MediaFormat.MIMETYPE_AUDIO_AAC,
+                RECORD_SAMPLE_RATE,
+                RECORD_CHANNEL_COUNT
+            ).apply {
+                setInteger(android.media.MediaFormat.KEY_AAC_PROFILE, android.media.MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(android.media.MediaFormat.KEY_BIT_RATE, RECORD_BIT_RATE)
+                setInteger(android.media.MediaFormat.KEY_MAX_INPUT_SIZE, pcmBufferSize)
+            }
+
+            val nextEncoder = android.media.MediaCodec.createEncoderByType(android.media.MediaFormat.MIMETYPE_AUDIO_AAC)
+            encoder = nextEncoder
+            nextEncoder.configure(format, null, null, android.media.MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val nextMuxer = android.media.MediaMuxer(file.absolutePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = nextMuxer
+
+            outputFile = file
+            trackIndex = -1
+            muxerStarted = false
+            wroteSamples = false
+            threadFailed = false
+            shouldRecord = true
+
+            nextEncoder.start()
+            recorder.startRecording()
+            recordingThread = Thread({ encodeLoop() }, "RougoShadowAudioRecorder").also { it.start() }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun createAudioRecord(source: Int, bufferSize: Int): android.media.AudioRecord {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            android.media.AudioRecord.Builder()
+                .setAudioSource(source)
+                .setAudioFormat(
+                    android.media.AudioFormat.Builder()
+                        .setSampleRate(RECORD_SAMPLE_RATE)
+                        .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(android.media.AudioFormat.CHANNEL_IN_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .build()
+        } else {
+            @Suppress("DEPRECATION")
+            android.media.AudioRecord(
+                source,
+                RECORD_SAMPLE_RATE,
+                android.media.AudioFormat.CHANNEL_IN_MONO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+        }
+    }
+
+    private fun attachVoiceEffects(audioSessionId: Int) {
+        noiseSuppressor = try {
+            if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                android.media.audiofx.NoiseSuppressor.create(audioSessionId)?.apply { enabled = true }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+
+        echoCanceler = try {
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                android.media.audiofx.AcousticEchoCanceler.create(audioSessionId)?.apply { enabled = true }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+
+        gainControl = try {
+            if (android.media.audiofx.AutomaticGainControl.isAvailable()) {
+                android.media.audiofx.AutomaticGainControl.create(audioSessionId)?.apply { enabled = true }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun releaseEffect(effect: android.media.audiofx.AudioEffect?) {
+        try { effect?.release() } catch (e: Exception) {}
+    }
+
+    private fun encodeLoop() {
+        val recorder = audioRecord ?: return
+        val nextEncoder = encoder ?: return
+        val nextMuxer = muxer ?: return
+        val info = android.media.MediaCodec.BufferInfo()
+        var inputEnded = false
+        var outputEnded = false
+        var submittedFrames = 0L
+
+        try {
+            while (!outputEnded) {
+                if (!inputEnded) {
+                    val inputIndex = nextEncoder.dequeueInputBuffer(10000)
+                    if (inputIndex >= 0) {
+                        val inputBuffer = nextEncoder.getInputBuffer(inputIndex)
+                        if (inputBuffer == null) {
+                            nextEncoder.queueInputBuffer(inputIndex, 0, 0, 0L, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputEnded = true
+                        } else if (shouldRecord) {
+                            inputBuffer.clear()
+                            val bytesRead = recorder.read(inputBuffer, inputBuffer.capacity(), android.media.AudioRecord.READ_BLOCKING)
+                            if (bytesRead > 0) {
+                                val presentationTimeUs = submittedFrames * 1_000_000L / RECORD_SAMPLE_RATE
+                                nextEncoder.queueInputBuffer(inputIndex, 0, bytesRead, presentationTimeUs, 0)
+                                submittedFrames += bytesRead / RECORD_BYTES_PER_FRAME
+                            } else if (!shouldRecord) {
+                                nextEncoder.queueInputBuffer(inputIndex, 0, 0, submittedFrames * 1_000_000L / RECORD_SAMPLE_RATE, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputEnded = true
+                            } else {
+                                threadFailed = true
+                                nextEncoder.queueInputBuffer(inputIndex, 0, 0, submittedFrames * 1_000_000L / RECORD_SAMPLE_RATE, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputEnded = true
+                            }
+                        } else {
+                            nextEncoder.queueInputBuffer(inputIndex, 0, 0, submittedFrames * 1_000_000L / RECORD_SAMPLE_RATE, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputEnded = true
+                        }
+                    }
+                }
+
+                var outputIndex = nextEncoder.dequeueOutputBuffer(info, 10000)
+                while (outputIndex != android.media.MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    when {
+                        outputIndex == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            trackIndex = nextMuxer.addTrack(nextEncoder.outputFormat)
+                            nextMuxer.start()
+                            muxerStarted = true
+                        }
+                        outputIndex >= 0 -> {
+                            val outputBuffer = nextEncoder.getOutputBuffer(outputIndex)
+                            if (outputBuffer != null) {
+                                if ((info.flags and android.media.MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                    info.size = 0
+                                }
+                                if (info.size > 0 && muxerStarted) {
+                                    outputBuffer.position(info.offset)
+                                    outputBuffer.limit(info.offset + info.size)
+                                    nextMuxer.writeSampleData(trackIndex, outputBuffer, info)
+                                    wroteSamples = true
+                                }
+                            }
+
+                            outputEnded = (info.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                            nextEncoder.releaseOutputBuffer(outputIndex, false)
+                            if (outputEnded) break
+                        }
+                    }
+                    outputIndex = nextEncoder.dequeueOutputBuffer(info, 0)
+                }
+            }
+        } catch (e: Exception) {
+            threadFailed = true
+            e.printStackTrace()
+        }
+    }
+
+    private companion object {
+        const val RECORD_SAMPLE_RATE = 48000
+        const val RECORD_CHANNEL_COUNT = 1
+        const val RECORD_BIT_RATE = 160000
+        const val RECORD_BYTES_PER_FRAME = 2 * RECORD_CHANNEL_COUNT
     }
 }
 
@@ -411,6 +730,92 @@ class LibraryManager(context: Context) {
 
 data class UpdateInfo(val tagName: String, val downloadUrl: String, val body: String)
 
+private data class YoutubeSubtitleChoice(
+    val label: String,
+    val languageCode: String,
+    val isAutoGenerated: Boolean
+)
+
+private data class YoutubeStreamFormat(
+    val formatId: String?,
+    val formatNote: String?,
+    val ext: String?,
+    val vcodec: String?,
+    val acodec: String?,
+    val height: Int,
+    val tbr: Int,
+    val url: String?,
+    val manifestUrl: String?
+)
+
+private data class YoutubeSetupData(
+    val title: String,
+    val fallbackUrl: String?,
+    val formats: List<YoutubeStreamFormat>,
+    val subtitleChoices: List<YoutubeSubtitleChoice>
+)
+
+private data class YoutubeResolutionOption(val key: String, val label: String)
+
+private const val PREF_YOUTUBE_RESOLUTION = "youtube_preferred_resolution"
+private const val PREF_YOUTUBE_AUTO_SUBTITLES = "youtube_auto_subtitles"
+private const val PREF_SKIP_SECONDS = "player_skip_seconds"
+private const val PREF_SUBTITLE_OFFSET_MS = "subtitle_offset_ms"
+private const val PREF_LIGHT_MODE = "app_light_mode"
+private const val DEFAULT_SKIP_SECONDS = 5
+private const val DEFAULT_SUBTITLE_OFFSET_MS = 0L
+private const val YOUTUBE_RESOLUTION_ASK = "ask"
+private const val YOUTUBE_RESOLUTION_HIGHEST = "highest"
+private const val YOUTUBE_RESOLUTION_AUDIO = "audio"
+private const val PLAYER_NOTIFICATION_CHANNEL_ID = "rougo_player_controls"
+private const val PLAYER_NOTIFICATION_ID = 2407
+private const val ACTION_PLAYER_PLAY_PAUSE = "com.selxo.rougo.action.PLAY_PAUSE"
+private const val ACTION_PLAYER_REWIND = "com.selxo.rougo.action.REWIND"
+private const val ACTION_PLAYER_FORWARD = "com.selxo.rougo.action.FORWARD"
+private const val ACTION_PLAYER_STOP = "com.selxo.rougo.action.STOP"
+
+private val YOUTUBE_RESOLUTION_OPTIONS = listOf(
+    YoutubeResolutionOption(YOUTUBE_RESOLUTION_ASK, "Ask every time"),
+    YoutubeResolutionOption("480", "480p"),
+    YoutubeResolutionOption("720", "720p"),
+    YoutubeResolutionOption("1080", "1080p"),
+    YoutubeResolutionOption(YOUTUBE_RESOLUTION_HIGHEST, "Highest available"),
+    YoutubeResolutionOption(YOUTUBE_RESOLUTION_AUDIO, "Audio only")
+)
+
+private val PLAYER_NOTIFICATION_ACTIONS = arrayOf(
+    ACTION_PLAYER_PLAY_PAUSE,
+    ACTION_PLAYER_REWIND,
+    ACTION_PLAYER_FORWARD,
+    ACTION_PLAYER_STOP
+)
+
+private val RougoDarkColorScheme = darkColorScheme(
+    background = Color(0xFF141419),
+    surface = Color(0xFF222228),
+    surfaceVariant = Color(0xFF2D2D36),
+    primary = Color(0xFFAEB2FF),
+    secondary = Color(0xFF73D6C9),
+    tertiary = Color(0xFFFFB08A),
+    onBackground = Color(0xFFF7F7FB),
+    onSurface = Color(0xFFF7F7FB),
+    onSurfaceVariant = Color(0xFFC7C7D1),
+    onPrimary = Color(0xFF141419)
+)
+
+private val RougoLightColorScheme = lightColorScheme(
+    background = Color(0xFFF7F7FC),
+    surface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFFE9EAF4),
+    primary = Color(0xFF585DDB),
+    secondary = Color(0xFF067A71),
+    tertiary = Color(0xFFB85F2E),
+    onBackground = Color(0xFF171720),
+    onSurface = Color(0xFF171720),
+    onSurfaceVariant = Color(0xFF5D6070),
+    onPrimary = Color.White
+)
+
 suspend fun checkForUpdates(): UpdateInfo? = withContext(Dispatchers.IO) {
     try {
         val url = URL("https://api.github.com/repos/kaihouguide/rougo/releases/latest")
@@ -512,9 +917,17 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 delay(500)
-                YoutubeDL.getInstance().init(applicationContext)
-                FFmpeg.getInstance().init(applicationContext)
-                try { YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel.NIGHTLY) } catch (e: Exception) { e.printStackTrace() }
+                ensureMediaToolsReady(applicationContext)
+                val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+                val lastUpdate = prefs.getLong("last_ytdlp_update", 0L)
+                if (System.currentTimeMillis() - lastUpdate > 24 * 60 * 60 * 1000L) {
+                    try {
+                        YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel.NIGHTLY)
+                        prefs.edit().putLong("last_ytdlp_update", System.currentTimeMillis()).apply()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
@@ -526,15 +939,20 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(
-                background = Color(0xFF141419), surface = Color(0xFF222228),
-                primary = Color(0xFFAEB2FF), onPrimary = Color(0xFF141419)
-            )) {
+            val prefs = remember { getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+            var lightModeEnabled by remember { mutableStateOf(prefs.getBoolean(PREF_LIGHT_MODE, false)) }
+
+            MaterialTheme(colorScheme = if (lightModeEnabled) RougoLightColorScheme else RougoDarkColorScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     Box(modifier = Modifier.systemBarsPadding()) {
                         MainAppFlow(
                             sharedUrl = sharedUrlState.value,
-                            onSharedUrlProcessed = { sharedUrlState.value = null }
+                            onSharedUrlProcessed = { sharedUrlState.value = null },
+                            lightModeEnabled = lightModeEnabled,
+                            onLightModeChanged = { enabled ->
+                                lightModeEnabled = enabled
+                                prefs.edit { putBoolean(PREF_LIGHT_MODE, enabled) }
+                            }
                         )
                         UpdateNotificationDialog()
                     }
@@ -567,13 +985,13 @@ class MainActivity : ComponentActivity() {
 fun isNewerVersion(remoteTag: String, currentVersion: String?): Boolean {
     if (currentVersion == null) return true
 
-    val remote = remoteTag.removePrefix("v").trim()
-    val local = currentVersion.removePrefix("v").trim()
+    val remote = remoteTag.trim().trimStart('v', 'V')
+    val local = currentVersion.trim().trimStart('v', 'V')
 
     if (remote == local) return false
 
-    val remoteParts = remote.split(".").mapNotNull { it.toIntOrNull() }
-    val localParts = local.split(".").mapNotNull { it.toIntOrNull() }
+    val remoteParts = Regex("\\d+").findAll(remote).map { it.value.toInt() }.toList()
+    val localParts = Regex("\\d+").findAll(local).map { it.value.toInt() }.toList()
 
     val maxLength = maxOf(remoteParts.size, localParts.size)
     for (i in 0 until maxLength) {
@@ -639,7 +1057,12 @@ fun UpdateNotificationDialog() {
 enum class AppScreen { Library, Player, Settings, DictionarySettings }
 
 @Composable
-fun MainAppFlow(sharedUrl: String?, onSharedUrlProcessed: () -> Unit) {
+fun MainAppFlow(
+    sharedUrl: String?,
+    onSharedUrlProcessed: () -> Unit,
+    lightModeEnabled: Boolean,
+    onLightModeChanged: (Boolean) -> Unit
+) {
     val context = LocalContext.current
     val libraryManager = remember { LibraryManager(context) }
     var currentScreen by remember { mutableStateOf(AppScreen.Library) }
@@ -674,7 +1097,9 @@ fun MainAppFlow(sharedUrl: String?, onSharedUrlProcessed: () -> Unit) {
     } else if (currentScreen == AppScreen.Settings) {
         SettingsScreen(
             onBack = { currentScreen = AppScreen.Library },
-            onNavigateToDictionaries = { currentScreen = AppScreen.DictionarySettings }
+            onNavigateToDictionaries = { currentScreen = AppScreen.DictionarySettings },
+            lightModeEnabled = lightModeEnabled,
+            onLightModeChanged = onLightModeChanged
         )
     } else if (currentScreen == AppScreen.DictionarySettings) {
         DictionarySettingsScreen(
@@ -698,86 +1123,97 @@ fun MainAppFlow(sharedUrl: String?, onSharedUrlProcessed: () -> Unit) {
 @Composable
 fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem) -> Unit) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    val preferredResolution = remember {
+        prefs.getString(PREF_YOUTUBE_RESOLUTION, YOUTUBE_RESOLUTION_ASK) ?: YOUTUBE_RESOLUTION_ASK
+    }
+    val shouldAutoDownloadSubtitles = remember {
+        prefs.getBoolean(PREF_YOUTUBE_AUTO_SUBTITLES, true)
+    }
     var status by remember { mutableStateOf("Fetching video info...") }
-    var videoInfo by remember { mutableStateOf<VideoInfo?>(null) }
-    var selectedFormat by remember { mutableStateOf<VideoFormat?>(null) }
+    var setupData by remember { mutableStateOf<YoutubeSetupData?>(null) }
+    var subtitleChoices by remember { mutableStateOf<List<YoutubeSubtitleChoice>>(emptyList()) }
+    var selectedFormat by remember { mutableStateOf<YoutubeStreamFormat?>(null) }
     var selectedSubtitleKey by remember { mutableStateOf<String?>(null) }
     var isAutoSub by remember { mutableStateOf(false) }
     var isProcessing by remember { mutableStateOf(false) }
 
     LaunchedEffect(url) {
-        withContext(Dispatchers.IO) {
-            try {
-                val info = YoutubeDL.getInstance().getInfo(url)
-                withContext(Dispatchers.Main) { videoInfo = info }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    status = "Failed: ${e.localizedMessage}"
-                    delay(3000)
-                    onDismiss()
+        try {
+            val fetchedSetupData = withContext(Dispatchers.IO) {
+                fetchYoutubeSetupData(context, url)
+            }
+            setupData = fetchedSetupData
+            subtitleChoices = fetchedSetupData.subtitleChoices
+
+            if (preferredResolution != YOUTUBE_RESOLUTION_ASK) {
+                val format = selectPreferredYoutubeFormat(fetchedSetupData.formats, preferredResolution)
+                if (format != null) {
+                    isProcessing = true
+                    status = "Opening ${youtubeResolutionLabel(preferredResolution)}..."
+                    val subtitleChoice = if (shouldAutoDownloadSubtitles) {
+                        selectPreferredYoutubeSubtitle(fetchedSetupData.subtitleChoices)
+                    } else {
+                        null
+                    }
+                    val subtitleUri = if (subtitleChoice != null) {
+                        status = "Fetching subtitles..."
+                        withContext(Dispatchers.IO) {
+                            downloadYoutubeSubtitle(context, url, subtitleChoice.languageCode, subtitleChoice.isAutoGenerated)
+                        }
+                    } else {
+                        null
+                    }
+
+                    onComplete(createYoutubeLibraryItem(fetchedSetupData, format, subtitleUri, url))
+                } else {
+                    status = "Preferred quality unavailable. Pick another format."
                 }
             }
+        } catch (e: Exception) {
+            status = "Failed: ${e.localizedMessage}"
+            delay(3000)
+            onDismiss()
+        }
+    }
+
+    fun openSelectedFormat(format: YoutubeStreamFormat, subtitleUri: String?) {
+        onComplete(createYoutubeLibraryItem(setupData, format, subtitleUri, url))
+    }
+
+    suspend fun resolveSelectedSubtitle(): String? {
+        val selectedSubtitleLanguage = selectedSubtitleKey
+        return if (selectedSubtitleLanguage != null) {
+            withContext(Dispatchers.IO) {
+                downloadYoutubeSubtitle(context, url, selectedSubtitleLanguage, isAutoSub)
+            }
+        } else {
+            null
         }
     }
 
     LaunchedEffect(selectedFormat) {
-        if (selectedFormat != null) {
+        val format = selectedFormat
+        if (format != null) {
             isProcessing = true
-            status = "Resolving Stream..."
+            val selectedSubtitleLanguage = selectedSubtitleKey
+            status = if (selectedSubtitleLanguage != null) "Fetching subtitles..." else "Opening stream..."
 
-            val newItem = LibraryItem(
-                id = UUID.randomUUID().toString(),
-                title = videoInfo?.title ?: "YouTube Stream",
-                mediaUri = selectedFormat?.url ?: videoInfo?.url ?: url,
-                subtitleUri = null,
-                progress = 0L,
-                duration = 0L,
-                isVideo = selectedFormat?.vcodec != "none",
-                sourceUrl = url,
-                formatId = selectedFormat?.formatId
-            )
+            val subtitleUri = resolveSelectedSubtitle()
 
-            onComplete(newItem)
-
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoSubs")
-                    destDir.mkdirs()
-                    val fileId = UUID.randomUUID().toString()
-
-                    val request = YoutubeDLRequest(url)
-                    request.addOption("--no-update")
-                    request.addOption("--skip-download")
-
-                    if (selectedSubtitleKey != null) {
-                        if (isAutoSub) {
-                            request.addOption("--write-auto-subs")
-                        } else {
-                            request.addOption("--write-subs")
-                        }
-                        request.addOption("--sub-langs", selectedSubtitleKey!!)
-                    }
-
-                    request.addOption("-o", "${destDir.absolutePath}/$fileId.%(ext)s")
-
-                    YoutubeDL.getInstance().execute(request, fileId)
-
-                    val subFile = destDir.listFiles()?.find { it.name.startsWith(fileId) && (it.extension.lowercase() == "srt" || it.extension.lowercase() == "vtt" || it.name.endsWith(".srt") || it.name.endsWith(".vtt")) }
-                    if (subFile != null) {
-                        val updatedItem = newItem.copy(subtitleUri = Uri.fromFile(subFile).toString())
-                        LibraryManager(context).saveItem(updatedItem)
-                    }
-                } catch (e: Exception) { e.printStackTrace() }
+            if (selectedSubtitleLanguage != null && subtitleUri == null) {
+                Toast.makeText(context, "Subtitle download failed; opening video without subtitles.", Toast.LENGTH_SHORT).show()
             }
+            openSelectedFormat(format, subtitleUri)
         }
     }
 
     AlertDialog(
-        onDismissRequest = { if (!isProcessing && videoInfo == null) onDismiss() },
+        onDismissRequest = { if (!isProcessing && setupData == null) onDismiss() },
         title = { Text("Stream Setup", fontWeight = FontWeight.Bold) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                if (videoInfo == null || isProcessing) {
+                if (setupData == null || isProcessing) {
                     Text(status, color = Color.LightGray, fontSize = 14.sp)
                     Spacer(Modifier.height(16.dp))
                     LinearProgressIndicator(
@@ -788,38 +1224,28 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                     Text("1. Select Subtitles (Optional):", color = Color.LightGray, fontSize = 14.sp)
                     Spacer(Modifier.height(8.dp))
 
-                    val subOptions = mutableListOf<Triple<String, String, Boolean>>()
-
-                    try {
-                        val subtitlesField = videoInfo?.javaClass?.getDeclaredField("subtitles")
-                        subtitlesField?.isAccessible = true
-                        val subtitles = subtitlesField?.get(videoInfo) as? Map<String, *>
-                        subtitles?.forEach { (lang, _) -> subOptions.add(Triple(lang, lang, false)) }
-
-                        val autoSubsField = videoInfo?.javaClass?.getDeclaredField("automaticCaptions")
-                        autoSubsField?.isAccessible = true
-                        val autoSubs = autoSubsField?.get(videoInfo) as? Map<String, *>
-                        autoSubs?.forEach { (lang, _) -> subOptions.add(Triple("$lang (Auto)", lang, true)) }
-                    } catch (e: Exception) { e.printStackTrace() }
-
-                    LazyColumn(modifier = Modifier.heightIn(max = 150.dp)) {
-                        items(subOptions) { option ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        selectedSubtitleKey = if (selectedSubtitleKey == option.second && isAutoSub == option.third) null else option.second
-                                        isAutoSub = option.third
-                                    }
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(
-                                    selected = (selectedSubtitleKey == option.second && isAutoSub == option.third),
-                                    onClick = null
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(option.first, color = Color.White, fontSize = 14.sp)
+                    if (subtitleChoices.isEmpty()) {
+                        Text("No YouTube subtitles found", color = Color.Gray, fontSize = 13.sp)
+                    } else {
+                        LazyColumn(modifier = Modifier.heightIn(max = 150.dp)) {
+                            items(subtitleChoices) { option ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            selectedSubtitleKey = if (selectedSubtitleKey == option.languageCode && isAutoSub == option.isAutoGenerated) null else option.languageCode
+                                            isAutoSub = option.isAutoGenerated
+                                        }
+                                        .padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = (selectedSubtitleKey == option.languageCode && isAutoSub == option.isAutoGenerated),
+                                        onClick = null
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(option.label, color = Color.White, fontSize = 14.sp)
+                                }
                             }
                         }
                     }
@@ -828,15 +1254,18 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                     Text("2. Select Quality:", color = Color.LightGray, fontSize = 14.sp)
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    val formats = videoInfo?.formats?.filter {
-                        (it.vcodec != "none" && it.acodec != "none") || (it.vcodec == "none" && it.acodec != "none")
-                    }?.reversed() ?: emptyList()
+                    val formats = setupData?.formats?.filter {
+                        ((it.vcodec != "none" && it.acodec != "none") || (it.vcodec == "none" && it.acodec != "none")) &&
+                            (!it.url.isNullOrBlank() || !it.manifestUrl.isNullOrBlank())
+                    }?.distinctBy { it.formatId ?: "${it.height}-${it.ext}-${it.vcodec}-${it.acodec}" }
+                        ?.sortedWith(compareByDescending<YoutubeStreamFormat> { if (it.vcodec == "none") 0 else it.height }.thenByDescending { it.tbr })
+                        ?: emptyList()
 
                     LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
                         items(formats) { format ->
                             val isAudioOnly = format.vcodec == "none"
                             val resolutionText = if (isAudioOnly) "Audio Only" else {
-                                format.height?.let { "${it}p" } ?: format.formatNote ?: "Standard"
+                                if (format.height > 0) "${format.height}p" else format.formatNote ?: "Standard"
                             }
                             Card(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { selectedFormat = format },
@@ -857,11 +1286,333 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
             }
         },
         confirmButton = {
-            if (videoInfo == null || isProcessing) {
+            if (setupData == null || isProcessing) {
                 Button(onClick = onDismiss) { Text("Cancel") }
             }
         }
     )
+}
+
+private fun ensureMediaToolsReady(context: Context) {
+    YoutubeDL.getInstance().init(context.applicationContext)
+    FFmpeg.getInstance().init(context.applicationContext)
+}
+
+private fun addFastYoutubeOptions(context: Context, request: YoutubeDLRequest): YoutubeDLRequest {
+    val cacheDir = File(context.cacheDir, "yt-dlp-cache").apply { mkdirs() }
+    return request
+        .addOption("--no-playlist")
+        .addOption("--skip-download")
+        .addOption("--no-warnings")
+        .addOption("--cache-dir", cacheDir.absolutePath)
+        .addOption("--extractor-args", "youtube:player_client=android,web")
+}
+
+private fun fetchYoutubeSetupData(context: Context, url: String): YoutubeSetupData {
+    val json = fetchYoutubeInfoJson(context, url)
+
+    return YoutubeSetupData(
+        title = json.optString("title", "YouTube Stream"),
+        fallbackUrl = json.optString("url").takeIf { it.isNotBlank() },
+        formats = parseYoutubeFormats(json),
+        subtitleChoices = parseYoutubeSubtitleChoices(json)
+    )
+}
+
+private fun createYoutubeLibraryItem(
+    setupData: YoutubeSetupData?,
+    format: YoutubeStreamFormat,
+    subtitleUri: String?,
+    sourceUrl: String
+): LibraryItem {
+    return LibraryItem(
+        id = UUID.randomUUID().toString(),
+        title = setupData?.title ?: "YouTube Stream",
+        mediaUri = format.url ?: format.manifestUrl ?: setupData?.fallbackUrl ?: sourceUrl,
+        subtitleUri = subtitleUri,
+        progress = 0L,
+        duration = 0L,
+        isVideo = format.vcodec != "none",
+        sourceUrl = sourceUrl,
+        formatId = format.formatId
+    )
+}
+
+private fun youtubeResolutionLabel(key: String): String {
+    return YOUTUBE_RESOLUTION_OPTIONS.firstOrNull { it.key == key }?.label ?: "Ask every time"
+}
+
+private fun hasPlayerNotificationPermission(context: Context): Boolean {
+    return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+}
+
+private fun createPlayerNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    if (manager.getNotificationChannel(PLAYER_NOTIFICATION_CHANNEL_ID) != null) return
+
+    val channel = NotificationChannel(
+        PLAYER_NOTIFICATION_CHANNEL_ID,
+        "Player controls",
+        NotificationManager.IMPORTANCE_LOW
+    ).apply {
+        description = "Playback controls for Rougo"
+        setShowBadge(false)
+    }
+    manager.createNotificationChannel(channel)
+}
+
+private fun playerNotificationPendingIntent(context: Context, action: String): PendingIntent {
+    val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+    val intent = Intent(action).setPackage(context.packageName)
+    return PendingIntent.getBroadcast(context, action.hashCode(), intent, flags)
+}
+
+private fun showPlayerNotification(
+    context: Context,
+    title: String,
+    currentPos: Long,
+    duration: Long,
+    isPlaying: Boolean,
+    skipSeconds: Int
+) {
+    if (!hasPlayerNotificationPermission(context)) return
+    createPlayerNotificationChannel(context)
+
+    val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+    val contentIntent = PendingIntent.getActivity(
+        context,
+        0,
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        flags
+    )
+
+    val notification = NotificationCompat.Builder(context, PLAYER_NOTIFICATION_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.ic_media_play)
+        .setContentTitle(title)
+        .setContentText("${formatTime(currentPos)} / ${formatTime(duration)}")
+        .setContentIntent(contentIntent)
+        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .setOnlyAlertOnce(true)
+        .setShowWhen(false)
+        .setOngoing(isPlaying)
+        .addAction(
+            android.R.drawable.ic_media_rew,
+            "-${skipSeconds}s",
+            playerNotificationPendingIntent(context, ACTION_PLAYER_REWIND)
+        )
+        .addAction(
+            if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+            if (isPlaying) "Pause" else "Play",
+            playerNotificationPendingIntent(context, ACTION_PLAYER_PLAY_PAUSE)
+        )
+        .addAction(
+            android.R.drawable.ic_media_ff,
+            "+${skipSeconds}s",
+            playerNotificationPendingIntent(context, ACTION_PLAYER_FORWARD)
+        )
+        .addAction(
+            android.R.drawable.ic_menu_close_clear_cancel,
+            "Stop",
+            playerNotificationPendingIntent(context, ACTION_PLAYER_STOP)
+        )
+        .build()
+
+    try {
+        NotificationManagerCompat.from(context).notify(PLAYER_NOTIFICATION_ID, notification)
+    } catch (e: SecurityException) {
+        e.printStackTrace()
+    }
+}
+
+private fun cancelPlayerNotification(context: Context) {
+    try {
+        NotificationManagerCompat.from(context).cancel(PLAYER_NOTIFICATION_ID)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+private fun selectPreferredYoutubeSubtitle(choices: List<YoutubeSubtitleChoice>): YoutubeSubtitleChoice? {
+    return choices.firstOrNull()
+}
+
+private fun selectPreferredYoutubeFormat(
+    formats: List<YoutubeStreamFormat>,
+    preferredResolution: String
+): YoutubeStreamFormat? {
+    val playable = formats.filter { !it.url.isNullOrBlank() || !it.manifestUrl.isNullOrBlank() }
+    val audioFormats = playable
+        .filter { it.vcodec == "none" && it.acodec != "none" }
+        .sortedWith(compareByDescending<YoutubeStreamFormat> { it.tbr }.thenByDescending { it.formatId ?: "" })
+    val videoFormats = playable
+        .filter { it.vcodec != "none" && it.acodec != "none" }
+        .sortedWith(compareByDescending<YoutubeStreamFormat> { it.height }.thenByDescending { it.tbr })
+
+    return when (preferredResolution) {
+        YOUTUBE_RESOLUTION_AUDIO -> audioFormats.firstOrNull() ?: videoFormats.firstOrNull()
+        YOUTUBE_RESOLUTION_HIGHEST -> videoFormats.firstOrNull() ?: audioFormats.firstOrNull()
+        else -> {
+            val targetHeight = preferredResolution.toIntOrNull()
+            if (targetHeight == null) {
+                videoFormats.firstOrNull() ?: audioFormats.firstOrNull()
+            } else {
+                videoFormats.firstOrNull { it.height in 1..targetHeight }
+                    ?: videoFormats.lastOrNull()
+                    ?: audioFormats.firstOrNull()
+            }
+        }
+    }
+}
+
+private fun resolveYoutubeStreamUrl(context: Context, url: String, formatId: String?): String? {
+    val json = fetchYoutubeInfoJson(context, url)
+    val targetFormat = parseYoutubeFormats(json).firstOrNull { it.formatId == formatId }
+    return targetFormat?.url ?: targetFormat?.manifestUrl ?: json.optString("url").takeIf { it.isNotBlank() }
+}
+
+private fun fetchYoutubeInfoJson(context: Context, url: String): JSONObject {
+    ensureMediaToolsReady(context)
+    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url))
+    request.addOption("--dump-json")
+
+    val response = YoutubeDL.getInstance().execute(request, null, false)
+    return JSONObject(extractDumpedJson(response.out))
+}
+
+private fun downloadYoutubeSubtitle(context: Context, url: String, languageCode: String, isAutoGenerated: Boolean): String? {
+    ensureMediaToolsReady(context)
+    val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoSubs")
+    destDir.mkdirs()
+
+    val fileId = UUID.randomUUID().toString()
+    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url))
+    request.addOption(if (isAutoGenerated) "--write-auto-subs" else "--write-subs")
+    request.addOption("--sub-langs", languageCode)
+    request.addOption("--sub-format", "vtt/srt/best")
+    request.addOption("--convert-subs", "srt")
+    request.addOption("-o", "${destDir.absolutePath}/$fileId.%(ext)s")
+
+    return try {
+        YoutubeDL.getInstance().execute(request, fileId, false)
+        val subtitleUri = findDownloadedSubtitle(destDir, fileId)?.let { Uri.fromFile(it).toString() }
+        if (subtitleUri == null && !isAutoGenerated) {
+            downloadYoutubeSubtitle(context, url, languageCode, true)
+        } else {
+            subtitleUri
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        if (!isAutoGenerated) {
+            downloadYoutubeSubtitle(context, url, languageCode, true)
+        } else {
+            null
+        }
+    }
+}
+
+private fun findDownloadedSubtitle(destDir: File, fileId: String): File? {
+    return destDir.listFiles()
+        ?.filter {
+            val ext = it.extension.lowercase(Locale.US)
+            it.name.startsWith(fileId) && it.length() > 0L && (ext == "srt" || ext == "vtt" || ext == "ass")
+        }
+        ?.maxWithOrNull(compareBy<File> {
+            when (it.extension.lowercase(Locale.US)) {
+                "srt" -> 3
+                "vtt" -> 2
+                else -> 1
+            }
+        }.thenBy { it.lastModified() })
+}
+
+private fun extractDumpedJson(output: String): String {
+    val trimmed = output.trim()
+    if (trimmed.startsWith("{")) return trimmed
+
+    return output.lineSequence()
+        .map { it.trim() }
+        .firstOrNull { it.startsWith("{") && it.endsWith("}") }
+        ?: trimmed
+}
+
+private fun parseYoutubeSubtitleChoices(json: JSONObject): List<YoutubeSubtitleChoice> {
+    val choices = linkedMapOf<String, YoutubeSubtitleChoice>()
+
+    fun addChoices(groupName: String, isAutoGenerated: Boolean) {
+        val group = json.optJSONObject(groupName) ?: return
+        val keys = group.keys()
+        while (keys.hasNext()) {
+            val languageCode = keys.next()
+            if (languageCode == "live_chat") continue
+            val tracks = group.optJSONArray(languageCode)
+            if (tracks == null || tracks.length() == 0) continue
+
+            val firstTrack = tracks.optJSONObject(0)
+            val trackName = firstTrack?.optString("name").orEmpty().takeIf { it.isNotBlank() }
+            val localeName = Locale.forLanguageTag(languageCode).displayName.takeIf { it.isNotBlank() && it != languageCode }
+            val languageName = trackName ?: localeName ?: languageCode
+            val label = if (isAutoGenerated) {
+                "$languageName ($languageCode, Auto)"
+            } else {
+                "$languageName ($languageCode)"
+            }
+            choices["$languageCode:$isAutoGenerated"] = YoutubeSubtitleChoice(label, languageCode, isAutoGenerated)
+        }
+    }
+
+    addChoices("subtitles", false)
+    addChoices("automatic_captions", true)
+
+    fun languagePriority(choice: YoutubeSubtitleChoice): Int {
+        val code = choice.languageCode.lowercase(Locale.US)
+        return when {
+            code == "ja" || code.startsWith("ja-") -> 0
+            code == "en" || code.startsWith("en-") -> 1
+            else -> 2
+        }
+    }
+
+    return choices.values.sortedWith(
+        compareBy<YoutubeSubtitleChoice> { languagePriority(it) }
+            .thenBy { it.isAutoGenerated }
+            .thenBy { it.label.lowercase(Locale.US) }
+    )
+}
+
+private fun parseYoutubeFormats(json: JSONObject): List<YoutubeStreamFormat> {
+    val formatsJson = json.optJSONArray("formats") ?: return emptyList()
+    val formats = mutableListOf<YoutubeStreamFormat>()
+
+    for (i in 0 until formatsJson.length()) {
+        val format = formatsJson.optJSONObject(i) ?: continue
+        formats.add(
+            YoutubeStreamFormat(
+                formatId = format.optString("format_id").takeIf { it.isNotBlank() },
+                formatNote = format.optString("format_note").takeIf { it.isNotBlank() },
+                ext = format.optString("ext").takeIf { it.isNotBlank() },
+                vcodec = format.optString("vcodec").takeIf { it.isNotBlank() },
+                acodec = format.optString("acodec").takeIf { it.isNotBlank() },
+                height = format.optInt("height", 0),
+                tbr = format.optDouble("tbr", 0.0).toInt(),
+                url = format.optString("url").takeIf { it.isNotBlank() },
+                manifestUrl = format.optString("manifest_url").takeIf { it.isNotBlank() }
+            )
+        )
+    }
+
+    return formats
+}
+
+private fun initialPlayableMediaUri(item: LibraryItem): String? {
+    val mediaUri = item.mediaUri.trim()
+    if (mediaUri.isBlank()) return null
+    if (item.sourceUrl == null) return mediaUri
+    return mediaUri.takeIf { it != item.sourceUrl }
 }
 
 // ==========================================
@@ -872,21 +1623,40 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
 @Composable
 fun LibraryScreen(items: List<LibraryItem>, onRefresh: () -> Unit, onItemClick: (LibraryItem) -> Unit, onDelete: (LibraryItem) -> Unit, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
-    val engine = remember { DictionaryEngine.getInstance(context) }
-    var importStatus by remember { mutableStateOf("") }
 
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingMediaUri by remember { mutableStateOf<Uri?>(null) }
     var pendingTitle by remember { mutableStateOf("") }
     var isVideoType by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf("All") }
+    var sortMode by remember { mutableStateOf("Recent") }
+    var showSortMenu by remember { mutableStateOf(false) }
 
-    val dictLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            CoroutineScope(Dispatchers.Main).launch {
-                engine.importZip(context, uri) { status -> importStatus = status }
+    val filteredItems = remember(items, searchQuery, selectedFilter, sortMode) {
+        val query = searchQuery.trim().lowercase(Locale.US)
+        val base = items.filter { item ->
+            val matchesQuery = query.isEmpty() || item.title.lowercase(Locale.US).contains(query)
+            val matchesFilter = when (selectedFilter) {
+                "Audio" -> !item.isVideo
+                "Video" -> item.isVideo
+                "YouTube" -> item.sourceUrl != null
+                "Local" -> item.sourceUrl == null
+                else -> true
             }
+            matchesQuery && matchesFilter
+        }
+
+        when (sortMode) {
+            "Title" -> base.sortedBy { it.title.lowercase(Locale.US) }
+            "Progress" -> base.sortedByDescending { if (it.duration > 0L) it.progress.toFloat() / it.duration.toFloat() else 0f }
+            "Recordings" -> base.sortedByDescending { it.recordings.size }
+            else -> base
         }
     }
+
+    val totalRecordings = remember(items) { items.sumOf { it.recordings.size } }
+    val inProgressCount = remember(items) { items.count { it.duration > 0L && it.progress > 0L } }
 
     val mediaLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -913,31 +1683,109 @@ fun LibraryScreen(items: List<LibraryItem>, onRefresh: () -> Unit, onItemClick: 
         containerColor = Color.Transparent,
         floatingActionButton = {
             FloatingActionButton(onClick = { mediaLauncher.launch(arrayOf("audio/*", "video/*")) }, containerColor = MaterialTheme.colorScheme.primary) {
-                Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.Black)
+                Icon(Icons.Default.Add, contentDescription = "Add", tint = MaterialTheme.colorScheme.onPrimary)
             }
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("My Library", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Row {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.primary)
+                Column {
+                    Text("Library", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
+                    Text(
+                        "${items.size} items | $inProgressCount started | $totalRecordings recordings",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                }
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear search")
+                        }
+                    }
+                },
+                placeholder = { Text("Search library") },
+                shape = RoundedCornerShape(12.dp)
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                    items(listOf("All", "Audio", "Video", "YouTube", "Local")) { filter ->
+                        FilterChip(
+                            selected = selectedFilter == filter,
+                            onClick = { selectedFilter = filter },
+                            label = { Text(filter) },
+                            leadingIcon = if (selectedFilter == filter) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                            } else null
+                        )
+                    }
+                }
+
+                Box {
+                    TextButton(onClick = { showSortMenu = true }) {
+                        Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(sortMode)
+                    }
+                    DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                        listOf("Recent", "Title", "Progress", "Recordings").forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option) },
+                                onClick = {
+                                    sortMode = option
+                                    showSortMenu = false
+                                }
+                            )
+                        }
                     }
                 }
             }
-            if (importStatus.isNotEmpty()) {
-                Text(importStatus, color = Color.Green, fontSize = 12.sp)
-            }
+
             Spacer(modifier = Modifier.height(16.dp))
 
             if (items.isEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(top = 48.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(44.dp))
+                        Spacer(Modifier.height(12.dp))
+                        Text("No media yet", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Add local audio/video or share a YouTube link into Rougo.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            } else if (filteredItems.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Library is empty.\nTap + to add local media,\nor Share from YouTube directly.", color = Color.Gray, textAlign = TextAlign.Center)
+                    Text("No matching items", color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(items) { item -> LibraryCard(item, onClick = { onItemClick(item) }, onDelete = { onDelete(item) }) }
+                    items(filteredItems, key = { it.id }) { item ->
+                        LibraryCard(item, onClick = { onItemClick(item) }, onDelete = { onDelete(item) })
+                    }
                 }
             }
         }
@@ -963,10 +1811,34 @@ fun LibraryScreen(items: List<LibraryItem>, onRefresh: () -> Unit, onItemClick: 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onNavigateToDictionaries: () -> Unit) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onNavigateToDictionaries: () -> Unit,
+    lightModeEnabled: Boolean,
+    onLightModeChanged: (Boolean) -> Unit
+) {
     val context = LocalContext.current
     val engine = remember { DictionaryEngine.getInstance(context) }
+    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    val appVersion = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: "V2"
+    }
     var noiseCancelEnabled by remember { mutableStateOf(engine.isNoiseCancellationEnabled()) }
+    var preferredYoutubeResolution by remember {
+        mutableStateOf(prefs.getString(PREF_YOUTUBE_RESOLUTION, YOUTUBE_RESOLUTION_ASK) ?: YOUTUBE_RESOLUTION_ASK)
+    }
+    var autoYoutubeSubtitles by remember {
+        mutableStateOf(prefs.getBoolean(PREF_YOUTUBE_AUTO_SUBTITLES, true))
+    }
+    var skipSeconds by remember {
+        mutableIntStateOf(prefs.getInt(PREF_SKIP_SECONDS, DEFAULT_SKIP_SECONDS).coerceIn(1, 30))
+    }
+    var subtitleOffsetSteps by remember {
+        mutableIntStateOf((prefs.getLong(PREF_SUBTITLE_OFFSET_MS, DEFAULT_SUBTITLE_OFFSET_MS) / 250L).toInt().coerceIn(-20, 20))
+    }
+    var showYoutubeQualityMenu by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -979,27 +1851,51 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToDictionaries: () -> Unit) {
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Transparent,
-                    titleContentColor = Color.White,
-                    navigationIconContentColor = Color.White
+                    titleContentColor = MaterialTheme.colorScheme.onBackground,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onBackground
                 )
             )
         },
         containerColor = Color.Transparent
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
+        Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (lightModeEnabled) Icons.Default.LightMode else Icons.Default.DarkMode,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Light Mode", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Use a brighter app theme", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                    Switch(
+                        checked = lightModeEnabled,
+                        onCheckedChange = onLightModeChanged
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
             Card(
                 modifier = Modifier.fillMaxWidth().clickable { onNavigateToDictionaries() },
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
                 Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(16.dp))
                     Column {
-                        Text("Dictionaries", fontWeight = FontWeight.Bold, color = Color.White)
-                        Text("Manage and import Yomitan dictionaries", color = Color.Gray, fontSize = 12.sp)
+                        Text("Dictionaries", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Manage and import Yomitan dictionaries", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                     Spacer(Modifier.weight(1f))
-                    Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color.Gray)
+                    Icon(Icons.Default.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
 
@@ -1013,8 +1909,8 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToDictionaries: () -> Unit) {
                     Icon(Icons.Default.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Noise Cancellation", fontWeight = FontWeight.Bold, color = Color.White)
-                        Text("Reduce background noise during shadowing", color = Color.Gray, fontSize = 12.sp)
+                        Text("Noise Cancellation", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Reduce background noise during shadowing", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                     Switch(
                         checked = noiseCancelEnabled,
@@ -1032,12 +1928,126 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToDictionaries: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Player Controls", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            Text("Customize seek buttons and subtitle timing", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Skip Buttons", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.width(120.dp))
+                        Slider(
+                            value = skipSeconds.toFloat(),
+                            onValueChange = {
+                                val next = it.roundToInt().coerceIn(1, 30)
+                                skipSeconds = next
+                                prefs.edit { putInt(PREF_SKIP_SECONDS, next) }
+                            },
+                            valueRange = 1f..30f,
+                            steps = 28,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text("${skipSeconds}s", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val subtitleOffsetMs = subtitleOffsetSteps * 250L
+                        Text("Subtitle Offset", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.width(120.dp))
+                        Slider(
+                            value = subtitleOffsetSteps.toFloat(),
+                            onValueChange = {
+                                val next = it.roundToInt().coerceIn(-20, 20)
+                                subtitleOffsetSteps = next
+                                prefs.edit { putLong(PREF_SUBTITLE_OFFSET_MS, next * 250L) }
+                            },
+                            valueRange = -20f..20f,
+                            steps = 39,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            String.format(Locale.US, "%.2fs", subtitleOffsetMs / 1000f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.width(56.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.HighQuality, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("YouTube Quality", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            Text("Skip quality picker when sharing videos", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        }
+                        Box {
+                            TextButton(onClick = { showYoutubeQualityMenu = true }) {
+                                Text(youtubeResolutionLabel(preferredYoutubeResolution))
+                            }
+                            DropdownMenu(
+                                expanded = showYoutubeQualityMenu,
+                                onDismissRequest = { showYoutubeQualityMenu = false }
+                            ) {
+                                YOUTUBE_RESOLUTION_OPTIONS.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label) },
+                                        onClick = {
+                                            preferredYoutubeResolution = option.key
+                                            prefs.edit { putString(PREF_YOUTUBE_RESOLUTION, option.key) }
+                                            showYoutubeQualityMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Spacer(Modifier.width(40.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Auto YouTube Subtitles", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                            Text("Use the best Japanese/English captions when quality picker is skipped", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        }
+                        Switch(
+                            checked = autoYoutubeSubtitles,
+                            onCheckedChange = {
+                                autoYoutubeSubtitles = it
+                                prefs.edit { putBoolean(PREF_YOUTUBE_AUTO_SUBTITLES, it) }
+                            }
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
                 Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Info, contentDescription = null, tint = Color.Gray)
+                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(16.dp))
                     Column {
-                        Text("Version", fontWeight = FontWeight.Bold, color = Color.White)
-                        Text("1.2.0 (Rougo Reader)", color = Color.Gray, fontSize = 12.sp)
+                        Text("Version", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("$appVersion (Rougo Reader)", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                 }
             }
@@ -1109,8 +2119,8 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Transparent,
-                    titleContentColor = Color.White,
-                    navigationIconContentColor = Color.White
+                    titleContentColor = MaterialTheme.colorScheme.onBackground,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onBackground
                 )
             )
         },
@@ -1125,7 +2135,7 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
 
             if (installedDicts.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No dictionaries installed.\nTap + to import a Yomitan ZIP.", color = Color.Gray, textAlign = TextAlign.Center)
+                    Text("No dictionaries installed.\nTap + to import a Yomitan ZIP.", color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1134,22 +2144,22 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                         ) {
                             Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Book, contentDescription = null, tint = Color.Gray)
+                                Icon(Icons.Default.Book, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.width(12.dp))
-                                Text(dictName, fontWeight = FontWeight.Medium, color = Color.White, modifier = Modifier.weight(1f))
+                                Text(dictName, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
 
                                 Row {
                                     IconButton(onClick = { moveDict(dictName, true) }, enabled = sortedDicts.indexOf(dictName) > 0) {
-                                        Icon(Icons.Default.ArrowUpward, contentDescription = "Move Up", tint = if (sortedDicts.indexOf(dictName) > 0) Color.White else Color.DarkGray)
+                                        Icon(Icons.Default.ArrowUpward, contentDescription = "Move Up", tint = if (sortedDicts.indexOf(dictName) > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant)
                                     }
                                     IconButton(onClick = { moveDict(dictName, false) }, enabled = sortedDicts.indexOf(dictName) < sortedDicts.size - 1) {
-                                        Icon(Icons.Default.ArrowDownward, contentDescription = "Move Down", tint = if (sortedDicts.indexOf(dictName) < sortedDicts.size - 1) Color.White else Color.DarkGray)
+                                        Icon(Icons.Default.ArrowDownward, contentDescription = "Move Down", tint = if (sortedDicts.indexOf(dictName) < sortedDicts.size - 1) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant)
                                     }
                                     IconButton(onClick = {
                                         engine.deleteDict(dictName)
                                         installedDicts = engine.getInstalledDictionaries()
                                     }) {
-                                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray)
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
                             }
@@ -1166,14 +2176,21 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
 fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit) {
     var libraryItem by remember { mutableStateOf(initialLibraryItem) }
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
     val dictionaryEngine = remember { DictionaryEngine.getInstance(context) }
     var showDictQuery by remember { mutableStateOf<String?>(null) }
+    val uiScope = rememberCoroutineScope()
+    val skipSeconds = remember { prefs.getInt(PREF_SKIP_SECONDS, DEFAULT_SKIP_SECONDS).coerceIn(1, 30) }
+    val skipDurationMs = skipSeconds * 1000L
 
     var isPlaying by remember { mutableStateOf(false) }
+    var isPlayerNotificationVisible by remember { mutableStateOf(true) }
     var currentPos by remember { mutableLongStateOf(libraryItem.progress) }
     var duration by remember { mutableLongStateOf(libraryItem.duration) }
     var isSubtitlesVisible by remember { mutableStateOf(libraryItem.subtitleUri != null || libraryItem.isVideo) }
-    var subtitleDelayMs by remember { mutableLongStateOf(0L) }
+    var subtitleDelayMs by remember {
+        mutableLongStateOf(prefs.getLong(PREF_SUBTITLE_OFFSET_MS, DEFAULT_SUBTITLE_OFFSET_MS).coerceIn(-5000L, 5000L))
+    }
 
     var parsedAudioCues by remember { mutableStateOf<List<SubtitleCue>>(emptyList()) }
     var isParsingSubtitles by remember { mutableStateOf(libraryItem.subtitleUri != null) }
@@ -1182,31 +2199,119 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     val albumArt = if (libraryItem.sourceUrl == null) loadAlbumArt(context, libraryItem.mediaUri, libraryItem.isVideo) else null
 
     var isRecording by remember { mutableStateOf(false) }
-    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var shadowAudioRecorder by remember { mutableStateOf<ShadowAudioRecorder?>(null) }
     var recordStartTime by remember { mutableLongStateOf(0L) }
 
     val recordings = remember { mutableStateListOf<ShadowRecording>().apply { addAll(libraryItem.recordings) } }
     var activeOriginalSegment by remember { mutableStateOf<ShadowRecording?>(null) }
     var activeBothSegment by remember { mutableStateOf<ShadowRecording?>(null) }
+    var repeatPracticeSegment by remember { mutableStateOf<ShadowRecording?>(null) }
+    var repeatAttemptCount by remember { mutableIntStateOf(0) }
 
     var showBacklog by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
 
-    var actualMediaUri by remember { mutableStateOf(if (libraryItem.sourceUrl == null) libraryItem.mediaUri else null) }
-    var isRefreshingStream by remember { mutableStateOf(libraryItem.sourceUrl != null) }
+    val initialPlayableUri = remember(libraryItem.id) { initialPlayableMediaUri(libraryItem) }
+    var actualMediaUri by remember(libraryItem.id) { mutableStateOf(initialPlayableUri) }
+    var isRefreshingStream by remember(libraryItem.id) { mutableStateOf(libraryItem.sourceUrl != null && initialPlayableUri == null) }
+    var resumePlaybackAfterPause by remember { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val libVlc = remember { VLCManager.getLibVLC(context) }
     val vlcPlayer = remember { VLCMediaPlayer(libVlc) }
     var videoLayout by remember { mutableStateOf<VLCVideoLayout?>(null) }
 
-    DisposableEffect(lifecycleOwner, videoLayout) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                if (libraryItem.isVideo && videoLayout != null) {
-                    vlcPlayer.detachViews()
-                    vlcPlayer.attachViews(videoLayout!!, null, false, false)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPlayerNotificationPermission(context)) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    DisposableEffect(vlcPlayer, skipDurationMs, duration) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    ACTION_PLAYER_PLAY_PAUSE -> {
+                        if (vlcPlayer.isPlaying) {
+                            vlcPlayer.pause()
+                            isPlaying = false
+                        } else {
+                            isPlayerNotificationVisible = true
+                            vlcPlayer.play()
+                            isPlaying = true
+                        }
+                    }
+                    ACTION_PLAYER_REWIND -> {
+                        val nextPosition = (vlcPlayer.time - skipDurationMs).coerceAtLeast(0L)
+                        vlcPlayer.time = nextPosition
+                        currentPos = nextPosition
+                    }
+                    ACTION_PLAYER_FORWARD -> {
+                        val upperBound = if (duration > 0L) duration else Long.MAX_VALUE
+                        val nextPosition = (vlcPlayer.time + skipDurationMs).coerceAtMost(upperBound)
+                        vlcPlayer.time = nextPosition
+                        currentPos = nextPosition
+                    }
+                    ACTION_PLAYER_STOP -> {
+                        try {
+                            vlcPlayer.pause()
+                            vlcPlayer.time = 0L
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        currentPos = 0L
+                        isPlaying = false
+                        isPlayerNotificationVisible = false
+                        cancelPlayerNotification(context)
+                    }
                 }
+            }
+        }
+        val filter = IntentFilter().apply {
+            PLAYER_NOTIFICATION_ACTIONS.forEach { addAction(it) }
+        }
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+
+        onDispose {
+            try { context.unregisterReceiver(receiver) } catch (e: Exception) {}
+            cancelPlayerNotification(context)
+        }
+    }
+
+    LaunchedEffect(isPlayerNotificationVisible, isPlaying, currentPos / 1000L, duration, libraryItem.title, skipSeconds) {
+        if (isPlayerNotificationVisible && actualMediaUri != null) {
+            showPlayerNotification(context, libraryItem.title, currentPos, duration, isPlaying, skipSeconds)
+        } else {
+            cancelPlayerNotification(context)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, videoLayout, actualMediaUri) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    if (libraryItem.isVideo) {
+                        resumePlaybackAfterPause = vlcPlayer.isPlaying
+                        currentPos = vlcPlayer.time.coerceAtLeast(0)
+                        try { vlcPlayer.pause() } catch (e: Exception) {}
+                        try { vlcPlayer.detachViews() } catch (e: Exception) {}
+                    }
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    if (libraryItem.isVideo && videoLayout != null && actualMediaUri != null) {
+                        try {
+                            vlcPlayer.detachViews()
+                            vlcPlayer.attachViews(videoLayout!!, null, false, false)
+                            if (currentPos > 0) vlcPlayer.time = currentPos
+                            if (resumePlaybackAfterPause) vlcPlayer.play()
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1217,14 +2322,18 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         val currentSourceUrl = libraryItem.sourceUrl
         if (currentSourceUrl != null && actualMediaUri == null) {
             isRefreshingStream = true
-            withContext(Dispatchers.IO) {
+            val resolvedUri = withContext(Dispatchers.IO) {
                 try {
-                    val info = YoutubeDL.getInstance().getInfo(currentSourceUrl)
-                    val targetFormat = info.formats?.find { it.formatId == libraryItem.formatId }
-                    actualMediaUri = targetFormat?.url ?: info.url
+                    resolveYoutubeStreamUrl(context, currentSourceUrl, libraryItem.formatId)
                 } catch (e: Exception) {
-                    actualMediaUri = libraryItem.mediaUri
+                    e.printStackTrace()
+                    initialPlayableMediaUri(libraryItem)
                 }
+            }
+            if (!resolvedUri.isNullOrBlank()) {
+                actualMediaUri = resolvedUri
+                libraryItem = libraryItem.copy(mediaUri = resolvedUri, progress = currentPos)
+                LibraryManager(context).saveItem(libraryItem)
             }
             isRefreshingStream = false
         }
@@ -1252,7 +2361,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             try { vlcPlayer.detachViews() } catch (e: Exception) {}
             try { vlcPlayer.release() } catch (e: Exception) {}
             try { voiceAudioPlayer.release() } catch (e: Exception) {}
-            try { mediaRecorder?.release() } catch (e: Exception) {}
+            try { shadowAudioRecorder?.release() } catch (e: Exception) {}
         }
     }
 
@@ -1320,13 +2429,15 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 currentSubtitleText = "Loading subtitles..."
             } else if (parsedAudioCues.isNotEmpty()) {
                 val effectivePos = currentPos - subtitleDelayMs
-                val activeCue = parsedAudioCues.find { effectivePos in it.startMs..it.endMs }
-                currentSubtitleText = activeCue?.text ?: ""
+                val nextSubtitleText = findSubtitleCue(parsedAudioCues, effectivePos)?.text ?: ""
+                if (currentSubtitleText != nextSubtitleText) currentSubtitleText = nextSubtitleText
             } else if (libraryItem.subtitleUri != null) {
-                currentSubtitleText = "No valid text found in subtitle file."
+                if (currentSubtitleText != "No valid text found in subtitle file.") {
+                    currentSubtitleText = "No valid text found in subtitle file."
+                }
             }
         } else {
-            currentSubtitleText = ""
+            if (currentSubtitleText.isNotEmpty()) currentSubtitleText = ""
         }
     }
 
@@ -1349,6 +2460,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 VLCMedia(libVlc, mediaUri)
             }
 
+            media.addOption(":network-caching=800")
+            media.addOption(":file-caching=300")
+            media.addOption(":http-reconnect")
             vlcPlayer.media = media
             media.release()
 
@@ -1376,8 +2490,31 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     }
                     VLCMediaPlayer.Event.EncounteredError -> {
                         isPlaying = false
-                        CoroutineScope(Dispatchers.Main).launch {
-                            Toast.makeText(context, "Playback failed. Stream might be geo-blocked or broken.", Toast.LENGTH_SHORT).show()
+                        val sourceUrl = libraryItem.sourceUrl
+                        if (sourceUrl != null && !isRefreshingStream) {
+                            uiScope.launch {
+                                isRefreshingStream = true
+                                val refreshedUri = withContext(Dispatchers.IO) {
+                                    try {
+                                        resolveYoutubeStreamUrl(context, sourceUrl, libraryItem.formatId)
+                                    } catch (e: Exception) {
+                                        e.printStackTrace()
+                                        null
+                                    }
+                                }
+                                if (!refreshedUri.isNullOrBlank()) {
+                                    libraryItem = libraryItem.copy(mediaUri = refreshedUri, progress = currentPos)
+                                    LibraryManager(context).saveItem(libraryItem)
+                                    actualMediaUri = refreshedUri
+                                } else {
+                                    Toast.makeText(context, "Playback failed. Stream might be geo-blocked or broken.", Toast.LENGTH_SHORT).show()
+                                }
+                                isRefreshingStream = false
+                            }
+                        } else {
+                            uiScope.launch {
+                                Toast.makeText(context, "Playback failed. Stream might be geo-blocked or broken.", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                 }
@@ -1415,35 +2552,126 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
     var tempFilePath by remember { mutableStateOf("") }
 
-    fun stopRecordingSafe(currentFilePath: String) {
-        val endTime = vlcPlayer.time
+    fun startRecordingToFile(file: File): Boolean {
+        val recorder = ShadowAudioRecorder(dictionaryEngine.isNoiseCancellationEnabled())
+        return if (recorder.start(file)) {
+            shadowAudioRecorder = recorder
+            isRecording = true
+            true
+        } else {
+            recorder.release()
+            false
+        }
+    }
+
+    fun stopRecordingSafe(
+        currentFilePath: String,
+        startTimeOverride: Long? = null,
+        endTimeOverride: Long? = null,
+        pausePlayer: Boolean = true,
+        showShortToast: Boolean = true
+    ): Boolean {
+        val recorder = shadowAudioRecorder ?: return false
+        val endTime = endTimeOverride ?: vlcPlayer.time
         var success = true
         try {
-            mediaRecorder?.stop()
+            success = recorder.stop()
         } catch (e: Exception) {
             success = false
-            Toast.makeText(context, "Recording was too short!", Toast.LENGTH_SHORT).show()
+            if (showShortToast) Toast.makeText(context, "Recording was too short!", Toast.LENGTH_SHORT).show()
         } finally {
-            mediaRecorder?.release()
-            mediaRecorder = null
+            shadowAudioRecorder = null
             isRecording = false
-            vlcPlayer.pause()
+            if (pausePlayer) vlcPlayer.pause()
         }
 
         if (success) {
-            recordings.add(0, ShadowRecording(filePath = currentFilePath, startTime = recordStartTime, endTime = endTime))
+            recordings.add(0, ShadowRecording(filePath = currentFilePath, startTime = startTimeOverride ?: recordStartTime, endTime = endTime))
             syncWithStorage()
+        } else {
+            try { File(currentFilePath).delete() } catch (e: Exception) {}
         }
+        return success
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (!isGranted) Toast.makeText(context, "Mic required!", Toast.LENGTH_SHORT).show()
     }
 
+    LaunchedEffect(repeatPracticeSegment) {
+        val segment = repeatPracticeSegment ?: return@LaunchedEffect
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            repeatPracticeSegment = null
+            return@LaunchedEffect
+        }
+        if (segment.endTime <= segment.startTime + 250L) {
+            Toast.makeText(context, "Segment is too short to repeat.", Toast.LENGTH_SHORT).show()
+            repeatPracticeSegment = null
+            return@LaunchedEffect
+        }
+
+        repeatAttemptCount = 0
+        activeOriginalSegment = null
+        activeBothSegment = null
+
+        try {
+            while (repeatPracticeSegment?.id == segment.id) {
+                val file = File(context.getExternalFilesDir(Environment.DIRECTORY_MUSIC), "Shadowing_${System.currentTimeMillis()}.m4a")
+                tempFilePath = file.absolutePath
+                recordStartTime = segment.startTime
+
+                vlcPlayer.time = segment.startTime
+                if (!startRecordingToFile(file)) {
+                    Toast.makeText(context, "Could not start recording.", Toast.LENGTH_SHORT).show()
+                    repeatPracticeSegment = null
+                    break
+                }
+
+                vlcPlayer.play()
+
+                var seekWaitCount = 0
+                while (
+                    kotlin.math.abs(vlcPlayer.time - segment.startTime) > 1500 &&
+                    seekWaitCount < 40 &&
+                    repeatPracticeSegment?.id == segment.id
+                ) {
+                    delay(50)
+                    seekWaitCount++
+                }
+
+                while (vlcPlayer.time < segment.endTime && repeatPracticeSegment?.id == segment.id) {
+                    delay(50)
+                }
+
+                if (repeatPracticeSegment?.id != segment.id) break
+
+                stopRecordingSafe(
+                    currentFilePath = file.absolutePath,
+                    startTimeOverride = segment.startTime,
+                    endTimeOverride = segment.endTime,
+                    pausePlayer = true,
+                    showShortToast = false
+                )
+                repeatAttemptCount += 1
+                delay(350)
+            }
+        } finally {
+            shadowAudioRecorder?.let { recorder ->
+                try { recorder.stop() } catch (e: Exception) {}
+                try { recorder.release() } catch (e: Exception) {}
+                shadowAudioRecorder = null
+                isRecording = false
+                try { File(tempFilePath).delete() } catch (e: Exception) {}
+            }
+            try { vlcPlayer.pause() } catch (e: Exception) {}
+        }
+    }
+
     var voiceCurrentPos by remember { mutableLongStateOf(-1L) }
     LaunchedEffect(Unit) {
         while (true) {
-            if (isPlaying || activeOriginalSegment != null || activeBothSegment != null) {
+            if (isPlaying || activeOriginalSegment != null || activeBothSegment != null || repeatPracticeSegment != null) {
                 currentPos = vlcPlayer.time
             }
 
@@ -1453,7 +2681,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 voiceCurrentPos = -1L
             }
 
-            delay(16)
+            delay(if (isPlaying || voiceAudioPlayer.isPlaying || activeOriginalSegment != null || activeBothSegment != null || repeatPracticeSegment != null) 100 else 250)
         }
     }
 
@@ -1464,9 +2692,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 val updatedItem = libraryItem.copy(progress = currentPos, duration = duration, recordings = recordings.toList(), mediaUri = actualMediaUri ?: libraryItem.mediaUri)
                 onBack(updatedItem)
             }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onBackground)
             }
-            Text(libraryItem.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(libraryItem.title, color = MaterialTheme.colorScheme.onBackground, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
 
             if (libraryItem.subtitleUri != null || libraryItem.isVideo) {
                 var showSubMenu by remember { mutableStateOf(false) }
@@ -1482,7 +2710,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     Icon(
                         imageVector = Icons.Default.Subtitles,
                         contentDescription = "Toggle Subs",
-                        tint = if (isSubtitlesVisible) MaterialTheme.colorScheme.primary else Color.Gray,
+                        tint = if (isSubtitlesVisible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
                             .size(40.dp)
                             .clip(CircleShape)
@@ -1540,14 +2768,15 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Resolving live stream URL...", color = Color.LightGray, fontSize = 14.sp)
+                        Text("Resolving live stream URL...", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                     }
                 } else if (libraryItem.isVideo) {
                     AndroidView(
                         factory = { ctx ->
-                            VLCVideoLayout(ctx).apply {
-                                videoLayout = this
-                            }
+                            VLCVideoLayout(ctx)
+                        },
+                        update = { view ->
+                            if (videoLayout !== view) videoLayout = view
                         },
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1559,7 +2788,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         )
                     } else {
                         Box(modifier = Modifier.fillMaxSize().background(Color(0xFF1E1E24)), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.DarkGray, modifier = Modifier.size(80.dp))
+                            Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f), modifier = Modifier.size(80.dp))
                         }
                     }
                 }
@@ -1582,7 +2811,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 16.dp)) {
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(formatTime(currentPos), color = Color.Gray, fontSize = 11.sp)
+                        Text(formatTime(currentPos), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                         Slider(
                             value = currentPos.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                             onValueChange = {
@@ -1591,24 +2820,34 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             },
                             valueRange = 0f..duration.toFloat().coerceAtLeast(1f), modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
                         )
-                        Text(formatTime(duration), color = Color.Gray, fontSize = 11.sp)
+                        Text(formatTime(duration), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                     }
 
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { vlcPlayer.time = (currentPos - 5000).coerceAtLeast(0) }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.FastRewind, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp)) }
+                        IconButton(onClick = {
+                            val nextPosition = (currentPos - skipDurationMs).coerceAtLeast(0)
+                            vlcPlayer.time = nextPosition
+                            currentPos = nextPosition
+                        }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.FastRewind, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp)) }
                         Box(modifier = Modifier.size(52.dp).clip(CircleShape).background(if (isRefreshingStream) Color.DarkGray else MaterialTheme.colorScheme.primary).clickable(enabled = !isRefreshingStream) {
                             if (isPlaying) {
                                 vlcPlayer.pause()
                             } else {
+                                isPlayerNotificationVisible = true
                                 if (currentPos >= duration - 500L && duration > 0) {
                                     vlcPlayer.time = 0
                                 }
                                 vlcPlayer.play()
                             }
                         }, contentAlignment = Alignment.Center) {
-                            Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(28.dp))
+                            Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(28.dp))
                         }
-                        IconButton(onClick = { vlcPlayer.time = (currentPos + 5000).coerceAtMost(duration) }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.FastForward, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp)) }
+                        IconButton(onClick = {
+                            val upperBound = if (duration > 0L) duration else Long.MAX_VALUE
+                            val nextPosition = (currentPos + skipDurationMs).coerceAtMost(upperBound)
+                            vlcPlayer.time = nextPosition
+                            currentPos = nextPosition
+                        }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.FastForward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp)) }
                     }
 
                     if (isSubtitlesVisible) {
@@ -1617,14 +2856,47 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Subtitle Delay", color = Color.Gray, fontSize = 13.sp)
+                            Text("Subtitle Delay", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                TextButton(onClick = { subtitleDelayMs -= 250L }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                TextButton(onClick = {
+                                    subtitleDelayMs = (subtitleDelayMs - 250L).coerceIn(-5000L, 5000L)
+                                    prefs.edit { putLong(PREF_SUBTITLE_OFFSET_MS, subtitleDelayMs) }
+                                }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                                     Text("-0.25s", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                                 }
-                                Text(String.format(Locale.US, "%.2fs", subtitleDelayMs / 1000f), color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                TextButton(onClick = { subtitleDelayMs += 250L }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Text(String.format(Locale.US, "%.2fs", subtitleDelayMs / 1000f), color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp))
+                                TextButton(onClick = {
+                                    subtitleDelayMs = (subtitleDelayMs + 250L).coerceIn(-5000L, 5000L)
+                                    prefs.edit { putLong(PREF_SUBTITLE_OFFSET_MS, subtitleDelayMs) }
+                                }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                                     Text("+0.25s", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    repeatPracticeSegment?.let { segment ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Repeat, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Repeating ${formatTime(segment.startTime)} - ${formatTime(segment.endTime)}  Attempts: $repeatAttemptCount",
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                TextButton(onClick = { repeatPracticeSegment = null }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                    Text("Stop", color = Color(0xFFFF8A80), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -1632,7 +2904,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
                     Button(
                         onClick = {
-                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            if (repeatPracticeSegment != null) {
+                                repeatPracticeSegment = null
+                            } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
                                 if (isRecording) {
@@ -1642,33 +2916,32 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                     tempFilePath = file.absolutePath
                                     recordStartTime = vlcPlayer.time
 
-                                    val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else @Suppress("DEPRECATION") MediaRecorder()
-                                    try {
-                                        recorder.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-                                        recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                                        recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                                        recorder.setAudioEncodingBitRate(128000)
-                                        recorder.setAudioSamplingRate(44100)
-                                        recorder.setOutputFile(file.absolutePath)
-                                        recorder.prepare()
-                                        recorder.start()
-                                        mediaRecorder = recorder
-                                        isRecording = true
+                                    if (startRecordingToFile(file)) {
                                         vlcPlayer.play()
-                                    } catch (e: Exception) { e.printStackTrace() }
+                                    } else {
+                                        Toast.makeText(context, "Could not start recording.", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         },
                         modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isRecording) Color(0xFFE53935) else MaterialTheme.colorScheme.primary,
-                            contentColor = if (isRecording) Color.White else Color.Black
+                            containerColor = if (isRecording || repeatPracticeSegment != null) Color(0xFFE53935) else MaterialTheme.colorScheme.primary,
+                            contentColor = if (isRecording || repeatPracticeSegment != null) Color.White else MaterialTheme.colorScheme.onPrimary
                         ),
                         enabled = !isRefreshingStream
                     ) {
-                        Icon(if (isRecording) Icons.Default.Stop else Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(if (isRecording || repeatPracticeSegment != null) Icons.Default.Stop else Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text(if (isRecording) "STOP SHADOWING" else "START SHADOWING", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(
+                            when {
+                                repeatPracticeSegment != null -> "STOP REPEAT MODE"
+                                isRecording -> "STOP SHADOWING"
+                                else -> "START SHADOWING"
+                            },
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
                     }
                 }
 
@@ -1676,7 +2949,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     item {
                         Spacer(modifier = Modifier.height(12.dp))
                         Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Latest Recording", color = Color.Gray, fontSize = 13.sp)
+                            Text("Latest Recording", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             if (recordings.size > 1) {
                                 TextButton(onClick = { showBacklog = true }, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(24.dp)) {
                                     Text("View Backlog (${recordings.size - 1})", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
@@ -1703,12 +2976,17 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                 }
                             },
                             onPlayBoth = { activeBothSegment = latest },
+                            onRepeatPractice = {
+                                repeatPracticeSegment = if (repeatPracticeSegment?.id == latest.id) null else latest
+                            },
                             onDelete = {
                                 try { File(latest.filePath).delete() } catch (e: Exception) {}
+                                if (repeatPracticeSegment?.id == latest.id) repeatPracticeSegment = null
                                 recordings.remove(latest)
                                 syncWithStorage()
                             },
                             onShare = { exportRecording(context, File(latest.filePath)) },
+                            isRepeatPracticeActive = repeatPracticeSegment?.id == latest.id,
                             currentOriginalTime = currentPos,
                             currentRecordedTime = voiceCurrentPos
                         )
@@ -1756,12 +3034,17 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                 }
                             },
                             onPlayBoth = { activeBothSegment = rec },
+                            onRepeatPractice = {
+                                repeatPracticeSegment = if (repeatPracticeSegment?.id == rec.id) null else rec
+                            },
                             onDelete = {
                                 try { File(rec.filePath).delete() } catch (e: Exception) {}
+                                if (repeatPracticeSegment?.id == rec.id) repeatPracticeSegment = null
                                 recordings.remove(rec)
                                 syncWithStorage()
                             },
                             onShare = { exportRecording(context, File(rec.filePath)) },
+                            isRepeatPracticeActive = repeatPracticeSegment?.id == rec.id,
                             currentOriginalTime = currentPos,
                             currentRecordedTime = voiceCurrentPos
                         )
@@ -2110,6 +3393,7 @@ fun AudioWaveformComparison(
     onPlayVoice: () -> Unit,
     originalProgress: Float = 0f,
     recordedProgress: Float = 0f,
+    isLoading: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxWidth().background(Color(0xFF1E1E24), RoundedCornerShape(8.dp)).padding(8.dp)) {
@@ -2119,7 +3403,8 @@ fun AudioWaveformComparison(
             color = Color(0xFF5E5CE6),
             label = "Original",
             onClick = onPlayOriginal,
-            progress = originalProgress
+            progress = originalProgress,
+            isLoading = isLoading
         )
         Spacer(Modifier.height(8.dp))
         WaveformTrack(
@@ -2128,7 +3413,8 @@ fun AudioWaveformComparison(
             color = Color(0xFF8E8E93),
             label = "Recorded",
             onClick = onPlayVoice,
-            progress = recordedProgress
+            progress = recordedProgress,
+            isLoading = isLoading
         )
     }
 }
@@ -2140,7 +3426,8 @@ fun WaveformTrack(
     color: Color,
     label: String,
     onClick: () -> Unit,
-    progress: Float = 0f
+    progress: Float = 0f,
+    isLoading: Boolean = false
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(48.dp)) {
         Box(
@@ -2153,38 +3440,48 @@ fun WaveformTrack(
             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
         }
         Spacer(Modifier.width(8.dp))
-        androidx.compose.foundation.Canvas(modifier = Modifier.weight(1f).fillMaxHeight()) {
+        Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+            if (amplitudes.isEmpty()) {
+                Text(
+                    if (isLoading) "Analyzing $label..." else "$label audio unavailable",
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                return@Box
+            }
+
+            androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+
             val step = size.width / amplitudes.size
             val midY = size.height / 2
 
             // Draw Symmetrical Amplitudes Bars
-            if (amplitudes.isNotEmpty()) {
-                val barWidth = (step * 0.7f).coerceAtLeast(2f)
-                for (i in amplitudes.indices) {
-                    val amp = amplitudes[i]
-                    val x = i * step + step / 2f
-                    val barHeight = (amp * size.height).coerceAtLeast(4f)
+            val barWidth = (step * 0.7f).coerceAtLeast(2f)
+            for (i in amplitudes.indices) {
+                val amp = amplitudes[i]
+                val x = i * step + step / 2f
+                val barHeight = (amp * size.height).coerceAtLeast(4f)
 
-                    drawLine(
-                        color = color.copy(alpha = 0.8f),
-                        start = androidx.compose.ui.geometry.Offset(x, midY - barHeight / 2f),
-                        end = androidx.compose.ui.geometry.Offset(x, midY + barHeight / 2f),
-                        strokeWidth = barWidth,
-                        cap = androidx.compose.ui.graphics.StrokeCap.Round
-                    )
-                }
+                drawLine(
+                    color = color.copy(alpha = 0.8f),
+                    start = androidx.compose.ui.geometry.Offset(x, midY - barHeight / 2f),
+                    end = androidx.compose.ui.geometry.Offset(x, midY + barHeight / 2f),
+                    strokeWidth = barWidth,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
             }
 
             // Draw Smooth Pitch Contour
             if (pitches != null && pitches.isNotEmpty()) {
                 val pitchPath = androidx.compose.ui.graphics.Path()
                 var isFirst = true
-                val minHz = 70f
-                val maxHz = 500f
+                val pitchScale = pitchDisplayScale(pitches)
 
                 pitches.forEachIndexed { index, pitchHz ->
-                    if (pitchHz != null && pitchHz in minHz..maxHz) {
-                        val normalizedY = 1f - ((pitchHz - minHz) / (maxHz - minHz)).coerceIn(0f, 1f)
+                    if (pitchHz != null && pitchScale != null) {
+                        val normalizedY = pitchToNormalizedY(pitchHz, pitchScale)
                         val y = normalizedY * size.height
                         val x = index * step + step / 2f
 
@@ -2219,6 +3516,7 @@ fun WaveformTrack(
                 )
             }
         }
+        }
     }
 }
 
@@ -2227,34 +3525,76 @@ fun LibraryCard(item: LibraryItem, onClick: () -> Unit, onDelete: () -> Unit) {
     val context = LocalContext.current
     val progressPct = if (item.duration > 0) (item.progress.toFloat() / item.duration.toFloat()) else 0f
     val albumArt = if (item.sourceUrl == null) loadAlbumArt(context, item.mediaUri, item.isVideo) else null
+    val itemType = when {
+        item.sourceUrl != null -> "YouTube"
+        item.isVideo -> "Video"
+        else -> "Audio"
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(12.dp)
+        shape = RoundedCornerShape(8.dp)
     ) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.width(64.dp).height(90.dp).clip(RoundedCornerShape(6.dp)).background(Color.DarkGray), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier.width(68.dp).height(92.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
                 if (albumArt != null) {
                     Image(bitmap = albumArt, contentDescription = "Cover", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 } else {
-                    Icon(if (item.isVideo) Icons.Default.Movie else Icons.Default.Audiotrack, contentDescription = null, tint = Color.White, modifier = Modifier.size(32.dp))
+                    Icon(
+                        if (item.isVideo) Icons.Default.Movie else Icons.Default.Audiotrack,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(34.dp)
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(item.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Spacer(modifier = Modifier.height(12.dp))
+                Text(item.title, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AssistChip(
+                        onClick = {},
+                        enabled = false,
+                        label = { Text(itemType, fontSize = 11.sp) },
+                        leadingIcon = {
+                            Icon(
+                                if (item.sourceUrl != null) Icons.Default.Cloud else if (item.isVideo) Icons.Default.Movie else Icons.Default.Audiotrack,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    )
+                    if (item.recordings.isNotEmpty()) {
+                        Text("${item.recordings.size} recordings", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("${(progressPct * 100).toInt()}%", color = Color.White, fontSize = 14.sp)
-                    Text(if (item.sourceUrl != null) "Cloud Stream" else if (item.subtitleUri != null) "Subtitles attached" else "No subtitles", color = Color.Gray, fontSize = 12.sp)
+                    Text("${(progressPct * 100).toInt()}%", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (item.subtitleUri != null) "Subtitles" else "No subtitles",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
                 }
                 Spacer(modifier = Modifier.height(6.dp))
-                LinearProgressIndicator(progress = { progressPct }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)), color = MaterialTheme.colorScheme.primary, trackColor = Color.DarkGray)
+                LinearProgressIndicator(
+                    progress = { progressPct },
+                    modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             }
-            IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray) }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -2267,8 +3607,10 @@ fun RecordingItemCard(
     onPlayOriginal: () -> Unit,
     onPlayVoice: () -> Unit,
     onPlayBoth: () -> Unit,
+    onRepeatPractice: () -> Unit,
     onDelete: () -> Unit,
     onShare: () -> Unit,
+    isRepeatPracticeActive: Boolean = false,
     currentOriginalTime: Long = -1L,
     currentRecordedTime: Long = -1L
 ) {
@@ -2276,19 +3618,23 @@ fun RecordingItemCard(
     var originalPitches by remember { mutableStateOf<List<Float?>>(emptyList()) }
     var recordedAmplitudes by remember { mutableStateOf<List<Float>>(emptyList()) }
     var recordedPitches by remember { mutableStateOf<List<Float?>>(emptyList()) }
+    var isWaveformLoading by remember { mutableStateOf(true) }
 
     LaunchedEffect(rec, originalMediaUri) {
-        withContext(Dispatchers.IO) {
-            // Real extraction without local caching of segment
-            val originalData = extractAudioData(context, Uri.parse(originalMediaUri), rec.startTime, rec.endTime, 40)
-            originalAmplitudes = originalData.first
-            originalPitches = originalData.second
-
-            // Pass 0 for endTimeMs to ensure the entire user recording is fully extracted
-            val recordedData = extractAudioData(context, Uri.fromFile(File(rec.filePath)), 0, 0, 40)
-            recordedAmplitudes = recordedData.first
-            recordedPitches = recordedData.second
+        isWaveformLoading = true
+        val (originalData, recordedData) = withContext(Dispatchers.IO) {
+            val originalKey = "v$WAVEFORM_CACHE_VERSION:original:${originalMediaUri}:${rec.startTime}:${rec.endTime}"
+            val recordedFile = File(rec.filePath)
+            val recordedKey = "v$WAVEFORM_CACHE_VERSION:recorded:${rec.filePath}:${recordedFile.lastModified()}:${recordedFile.length()}"
+            val originalData = extractAudioDataCached(context, originalKey, Uri.parse(originalMediaUri), rec.startTime, rec.endTime, WAVEFORM_BUCKET_COUNT)
+            val recordedData = extractAudioDataCached(context, recordedKey, Uri.fromFile(recordedFile), 0, 0, WAVEFORM_BUCKET_COUNT)
+            Pair(originalData, recordedData)
         }
+        originalAmplitudes = originalData.first
+        originalPitches = originalData.second
+        recordedAmplitudes = recordedData.first
+        recordedPitches = recordedData.second
+        isWaveformLoading = false
     }
 
     val originalProgress = if (currentOriginalTime in rec.startTime..rec.endTime) {
@@ -2299,17 +3645,17 @@ fun RecordingItemCard(
         currentRecordedTime.toFloat() / (rec.endTime - rec.startTime).toFloat()
     } else 0f
 
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp).fillMaxWidth()) {
             Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Text("Segment: ${formatTime(rec.startTime)} - ${formatTime(rec.endTime)}", color = Color.White, fontSize = 14.sp)
+                Text("Segment: ${formatTime(rec.startTime)} - ${formatTime(rec.endTime)}", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
                 Row {
                     IconButton(onClick = onShare, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.Gray, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Share, contentDescription = "Share", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                     }
                     Spacer(Modifier.width(16.dp))
                     IconButton(onClick = onDelete, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -2324,7 +3670,8 @@ fun RecordingItemCard(
                 onPlayOriginal = onPlayOriginal,
                 onPlayVoice = onPlayVoice,
                 originalProgress = originalProgress,
-                recordedProgress = recordedProgress
+                recordedProgress = recordedProgress,
+                isLoading = isWaveformLoading
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -2332,35 +3679,328 @@ fun RecordingItemCard(
             Button(
                 onClick = onPlayBoth,
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = Color.Black)
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary)
             ) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Play Both", fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = onRepeatPractice,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = if (isRepeatPracticeActive) Color(0xFFFF8A80) else MaterialTheme.colorScheme.primary
+                )
+            ) {
+                Icon(if (isRepeatPracticeActive) Icons.Default.Stop else Icons.Default.Repeat, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (isRepeatPracticeActive) "Stop Repeat" else "Repeat Segment", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
 
+private fun extractAudioDataCached(
+    context: Context,
+    cacheKey: String,
+    uri: Uri,
+    startTimeMs: Long,
+    endTimeMs: Long,
+    buckets: Int
+): Pair<List<Float>, List<Float?>> {
+    WaveformCache.get(cacheKey)?.let { return it }
+    return extractAudioData(context, uri, startTimeMs, endTimeMs, buckets).also {
+        WaveformCache.put(cacheKey, it)
+    }
+}
+
+private const val WAVEFORM_CACHE_VERSION = 5
+private const val WAVEFORM_SAMPLE_RATE = 44100
+private const val WAVEFORM_CHANNEL_COUNT = 1
+private const val WAVEFORM_BUCKET_COUNT = 96
+private const val PITCH_MIN_HZ = 50f
+private const val PITCH_MAX_HZ = 650f
+private const val YIN_THRESHOLD = 0.20f
+
+private data class DecodedPcm(
+    val bytes: ByteArray,
+    val sampleRate: Int,
+    val channelCount: Int
+)
+
+private data class FfmpegInput(
+    val value: String,
+    val tempFile: File? = null,
+    val pfd: ParcelFileDescriptor? = null
+)
+
+private data class PitchEstimate(val hz: Float, val confidence: Float)
+
+private data class PitchScale(val minLogHz: Double, val maxLogHz: Double)
+
 fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: Long, buckets: Int): Pair<List<Float>, List<Float?>> {
-    val resultAmps = MutableList(buckets) { 0.05f }
-    val resultPitches = MutableList<Float?>(buckets) { null }
-    var pcmDataBytes: ByteArray? = null
-    var finalSampleRate = 44100
-    var finalChannelCount = 1
+    val safeBuckets = buckets.coerceAtLeast(1)
+
+    val decoded = decodeAudioWithFfmpeg(context, uri, startTimeMs, endTimeMs)
+        ?: decodeAudioWithMediaCodec(context, uri, startTimeMs, endTimeMs)
+
+    if (decoded == null || decoded.bytes.isEmpty()) {
+        return Pair(emptyList(), emptyList())
+    }
 
     try {
-        val extractor = android.media.MediaExtractor()
-        if (uri.scheme == "content") {
-            context.contentResolver.openFileDescriptor(uri, "r")?.fileDescriptor?.let {
-                extractor.setDataSource(it)
+        val monoSamples = decodePcm16ToMonoFloat(decoded)
+        if (monoSamples.isEmpty()) return Pair(emptyList(), emptyList())
+
+        val samplesPerBucket = monoSamples.size / safeBuckets
+        if (samplesPerBucket == 0) return Pair(emptyList(), emptyList())
+
+        var globalSumSq = 0.0
+        var globalPeak = 0f
+        for (sample in monoSamples) {
+            val absSample = kotlin.math.abs(sample)
+            globalSumSq += (sample * sample).toDouble()
+            if (absSample > globalPeak) globalPeak = absSample
+        }
+        val globalRms = kotlin.math.sqrt(globalSumSq / monoSamples.size).toFloat()
+        if (globalPeak < 0.0005f || globalRms < 0.0002f) return Pair(emptyList(), emptyList())
+
+        val bucketAmps = FloatArray(safeBuckets)
+        val rawBucketRms = FloatArray(safeBuckets)
+
+        for (i in 0 until safeBuckets) {
+            val startIndex = i * samplesPerBucket
+            val endIndex = if (i == safeBuckets - 1) monoSamples.size else startIndex + samplesPerBucket
+
+            val length = endIndex - startIndex
+            var sumSq = 0.0
+            for (j in startIndex until endIndex) {
+                val s = monoSamples[j].toDouble()
+                sumSq += s * s
             }
-        } else if (uri.scheme == "file") {
-            extractor.setDataSource(uri.path!!)
-        } else if (uri.scheme?.startsWith("http") == true) {
-            extractor.setDataSource(uri.toString(), mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"))
+
+            val rms = if (length > 0) Math.sqrt(sumSq / length).toFloat() else 0f
+            rawBucketRms[i] = rms
+        }
+
+        val sortedRms = rawBucketRms.sorted()
+        val noiseFloor = percentile(sortedRms, 0.10f)
+        val referenceRms = percentile(sortedRms, 0.95f).coerceAtLeast(globalRms)
+        val ampRange = (referenceRms - noiseFloor).coerceAtLeast(0.0001f)
+        for (i in 0 until safeBuckets) {
+            val normalized = ((rawBucketRms[i] - noiseFloor) / ampRange).coerceIn(0f, 1f)
+            bucketAmps[i] = Math.pow(normalized.toDouble(), 0.55).toFloat().coerceIn(0.06f, 1f)
+        }
+
+        val pitchBuckets = estimatePitchContourYin(
+            samples = monoSamples,
+            sampleRate = decoded.sampleRate,
+            bucketCount = safeBuckets,
+            globalRms = globalRms
+        )
+
+        return Pair(bucketAmps.toList(), pitchBuckets)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    return Pair(emptyList(), emptyList())
+}
+
+private fun decodeAudioWithFfmpeg(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: Long): DecodedPcm? {
+    ensureMediaToolsReady(context)
+
+    resolveFfmpegInput(context, uri, preferFileDescriptor = true)?.let { firstInput ->
+        runFfmpegDecode(firstInput, context, startTimeMs, endTimeMs)?.let { return it }
+    }
+
+    if (endTimeMs > startTimeMs) {
+        resolveFfmpegInput(context, uri, preferFileDescriptor = true)?.let { accurateSeekInput ->
+            runFfmpegDecode(accurateSeekInput, context, startTimeMs, endTimeMs, seekAfterInput = true)?.let { return it }
+        }
+    }
+
+    if (uri.scheme?.lowercase(Locale.US) == "content") {
+        val fallbackInput = resolveFfmpegInput(context, uri, preferFileDescriptor = false) ?: return null
+        runFfmpegDecode(fallbackInput, context, startTimeMs, endTimeMs)?.let { return it }
+        if (endTimeMs > startTimeMs) {
+            val accurateSeekFallbackInput = resolveFfmpegInput(context, uri, preferFileDescriptor = false) ?: return null
+            return runFfmpegDecode(accurateSeekFallbackInput, context, startTimeMs, endTimeMs, seekAfterInput = true)
+        }
+    }
+
+    return null
+}
+
+private fun runFfmpegDecode(
+    input: FfmpegInput,
+    context: Context,
+    startTimeMs: Long,
+    endTimeMs: Long,
+    seekAfterInput: Boolean = false
+): DecodedPcm? {
+    val output = File.createTempFile("waveform_pcm_", ".raw", context.cacheDir)
+    return try {
+        val safeStartMs = startTimeMs.coerceAtLeast(0L)
+        val durationMs = if (endTimeMs > startTimeMs) endTimeMs - startTimeMs else 0L
+        val cmd = mutableListOf("-y", "-hide_banner", "-loglevel", "error", "-nostdin")
+
+        if (safeStartMs > 0L && !seekAfterInput) {
+            cmd.add("-ss")
+            cmd.add(formatSeconds(safeStartMs))
+        }
+
+        if (input.value.startsWith("http://", ignoreCase = true) || input.value.startsWith("https://", ignoreCase = true)) {
+            cmd.add("-user_agent")
+            cmd.add("Mozilla/5.0")
+        }
+
+        cmd.add("-i")
+        cmd.add(input.value)
+
+        if (safeStartMs > 0L && seekAfterInput) {
+            cmd.add("-ss")
+            cmd.add(formatSeconds(safeStartMs))
+        }
+
+        if (durationMs > 0L) {
+            cmd.add("-t")
+            cmd.add(formatSeconds(durationMs))
+        }
+
+        cmd.addAll(
+            listOf(
+                "-map", "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-acodec", "pcm_s16le",
+                "-ar", WAVEFORM_SAMPLE_RATE.toString(),
+                "-ac", WAVEFORM_CHANNEL_COUNT.toString(),
+                "-sample_fmt", "s16",
+                "-f", "s16le",
+                output.absolutePath
+            )
+        )
+
+        val rc = FFmpeg.getInstance().execute(cmd.toTypedArray())
+        if (rc == 0 && output.length() > 0L) {
+            DecodedPcm(output.readBytes(), WAVEFORM_SAMPLE_RATE, WAVEFORM_CHANNEL_COUNT)
         } else {
-            extractor.setDataSource(context, uri, null)
+            null
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    } finally {
+        try { output.delete() } catch (e: Exception) {}
+        try { input.tempFile?.delete() } catch (e: Exception) {}
+        try { input.pfd?.close() } catch (e: Exception) {}
+    }
+}
+
+private fun resolveFfmpegInput(context: Context, uri: Uri, preferFileDescriptor: Boolean): FfmpegInput? {
+    val scheme = uri.scheme?.lowercase(Locale.US)
+    return when (scheme) {
+        null, "file" -> {
+            val path = uri.path ?: return null
+            FfmpegInput(path)
+        }
+        "content" -> {
+            if (preferFileDescriptor) {
+                val pfd = try {
+                    context.contentResolver.openFileDescriptor(uri, "r")
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    null
+                } ?: return null
+
+                FfmpegInput("/proc/self/fd/${pfd.fd}", pfd = pfd)
+            } else {
+                materializeContentUriForFfmpeg(context, uri)?.let { FfmpegInput(it.absolutePath) }
+            }
+        }
+        "http", "https" -> FfmpegInput(uri.toString())
+        else -> FfmpegInput(uri.toString())
+    }
+}
+
+private fun materializeContentUriForFfmpeg(context: Context, uri: Uri): File? {
+    val fileName = getFileName(context, uri)
+    val extension = fileName.substringAfterLast('.', "media").lowercase(Locale.US).takeIf { it.length in 2..6 } ?: "media"
+    val expectedLength = getContentLength(context, uri)
+    val cacheDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: context.cacheDir, "WaveformMediaCache").apply { mkdirs() }
+    val safeKey = Integer.toHexString(uri.toString().hashCode())
+    val cachedFile = File(cacheDir, "media_${safeKey}.$extension")
+
+    if (cachedFile.exists() && cachedFile.length() > 0L) {
+        if (expectedLength == null || cachedFile.length() == expectedLength) return cachedFile
+        try { cachedFile.delete() } catch (e: Exception) {}
+    }
+
+    val tempFile = File(cacheDir, "${cachedFile.name}.tmp")
+    return try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            tempFile.outputStream().use { output -> input.copyTo(output) }
+        } ?: return null
+
+        if (tempFile.length() <= 0L) {
+            try { tempFile.delete() } catch (e: Exception) {}
+            return null
+        }
+
+        if (cachedFile.exists()) try { cachedFile.delete() } catch (e: Exception) {}
+        if (tempFile.renameTo(cachedFile)) {
+            cachedFile
+        } else {
+            tempFile.copyTo(cachedFile, overwrite = true)
+            try { tempFile.delete() } catch (e: Exception) {}
+            cachedFile.takeIf { it.length() > 0L }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        try { tempFile.delete() } catch (deleteError: Exception) {}
+        null
+    }
+}
+
+private fun getContentLength(context: Context, uri: Uri): Long? {
+    return try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else null
+            } else {
+                null
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+private fun decodeAudioWithMediaCodec(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: Long): DecodedPcm? {
+    var extractor: android.media.MediaExtractor? = null
+    var codec: android.media.MediaCodec? = null
+    var pfd: ParcelFileDescriptor? = null
+    var finalSampleRate = WAVEFORM_SAMPLE_RATE
+    var finalChannelCount = WAVEFORM_CHANNEL_COUNT
+
+    return try {
+        extractor = android.media.MediaExtractor()
+        when {
+            uri.scheme == "content" -> {
+                pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
+                extractor.setDataSource(pfd.fileDescriptor)
+            }
+            uri.scheme == "file" -> extractor.setDataSource(uri.path!!)
+            uri.scheme?.startsWith("http", ignoreCase = true) == true -> {
+                extractor.setDataSource(uri.toString(), mapOf("User-Agent" to "Mozilla/5.0"))
+            }
+            else -> extractor.setDataSource(context, uri, null)
         }
 
         var audioTrackIndex = -1
@@ -2373,280 +4013,340 @@ fun extractAudioData(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: L
             }
         }
 
-        if (audioTrackIndex >= 0) {
-            extractor.selectTrack(audioTrackIndex)
-            
-            // Fix M4B & MKV internal timecode offsets
-            var baseTimeUs = extractor.sampleTime
-            if (baseTimeUs < 0) baseTimeUs = 0L
+        if (audioTrackIndex < 0) return null
 
-            val format = extractor.getTrackFormat(audioTrackIndex)
-            val mime = format.getString(android.media.MediaFormat.KEY_MIME)!!
-            finalSampleRate = format.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
-            finalChannelCount = if (format.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)) {
-                format.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
-            } else 1
+        extractor.selectTrack(audioTrackIndex)
 
-            val codec = android.media.MediaCodec.createDecoderByType(mime)
-            codec.configure(format, null, null, 0)
-            codec.start()
+        var firstSampleUs = extractor.sampleTime
+        if (firstSampleUs < 0L) firstSampleUs = 0L
 
-            val startUs = startTimeMs * 1000L
-            val endUs = endTimeMs * 1000L
+        val format = extractor.getTrackFormat(audioTrackIndex)
+        val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: return null
+        finalSampleRate = format.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+        finalChannelCount = if (format.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)) {
+            format.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+        } else {
+            WAVEFORM_CHANNEL_COUNT
+        }
 
-            // Re-align our target times to match the internal file offset
-            val adjustedStartUs = startUs + baseTimeUs
-            val adjustedEndUs = if (endUs > 0) endUs + baseTimeUs else 0L
+        codec = android.media.MediaCodec.createDecoderByType(mime)
+        codec.configure(format, null, null, 0)
+        codec.start()
 
-            if (adjustedStartUs > 0) {
-                extractor.seekTo(adjustedStartUs, android.media.MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-            }
+        val adjustedStartUs = startTimeMs.coerceAtLeast(0L) * 1000L + firstSampleUs
+        val adjustedEndUs = if (endTimeMs > startTimeMs) endTimeMs * 1000L + firstSampleUs else 0L
 
-            val info = android.media.MediaCodec.BufferInfo()
-            var inputEOS = false
-            var outputEOS = false
-            val pcmData = ByteArrayOutputStream()
+        if (adjustedStartUs > 0L) {
+            extractor.seekTo(adjustedStartUs, android.media.MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        }
 
-            while (!outputEOS) {
-                if (!inputEOS) {
-                    val inIndex = codec.dequeueInputBuffer(10000)
-                    if (inIndex >= 0) {
-                        val buffer = codec.getInputBuffer(inIndex)!!
-                        val sampleSize = extractor.readSampleData(buffer, 0)
-                        val sampleTimeUs = extractor.sampleTime
+        val info = android.media.MediaCodec.BufferInfo()
+        var inputEOS = false
+        var outputEOS = false
+        val pcmData = ByteArrayOutputStream()
 
-                        if (sampleSize < 0 || (adjustedEndUs > 0 && sampleTimeUs > adjustedEndUs)) {
-                            codec.queueInputBuffer(inIndex, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputEOS = true
-                        } else {
-                            codec.queueInputBuffer(inIndex, 0, sampleSize, sampleTimeUs, 0)
-                            extractor.advance()
-                        }
+        while (!outputEOS) {
+            if (!inputEOS) {
+                val inIndex = codec.dequeueInputBuffer(10000)
+                if (inIndex >= 0) {
+                    val buffer = codec.getInputBuffer(inIndex)!!
+                    val sampleSize = extractor.readSampleData(buffer, 0)
+                    val sampleTimeUs = extractor.sampleTime
+
+                    if (sampleSize < 0 || (adjustedEndUs > 0L && sampleTimeUs > adjustedEndUs)) {
+                        codec.queueInputBuffer(inIndex, 0, 0, 0L, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputEOS = true
+                    } else {
+                        codec.queueInputBuffer(inIndex, 0, sampleSize, sampleTimeUs, 0)
+                        extractor.advance()
                     }
                 }
+            }
 
-                var outIndex = codec.dequeueOutputBuffer(info, 10000)
-                while (outIndex != android.media.MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    if (outIndex >= 0) {
-                        if ((info.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                            outputEOS = true
-                        }
-                        // Added larger tolerance range to safeguard against presentation skew
-                        if (info.size > 0 && info.presentationTimeUs >= adjustedStartUs - 1000000L) {
-                            if (adjustedEndUs == 0L || info.presentationTimeUs <= adjustedEndUs + 1000000L) {
-                                val outBuffer = codec.getOutputBuffer(outIndex)!!
-                                outBuffer.position(info.offset)
-                                outBuffer.limit(info.offset + info.size)
-                                val chunk = ByteArray(info.size)
-                                outBuffer.get(chunk)
-                                pcmData.write(chunk)
-                            }
-                        }
-                        codec.releaseOutputBuffer(outIndex, false)
-                        if (outputEOS) break
-                    } else if (outIndex == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        val newFormat = codec.outputFormat
-                        if (newFormat.containsKey(android.media.MediaFormat.KEY_SAMPLE_RATE)) {
-                            finalSampleRate = newFormat.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
-                        }
-                        if (newFormat.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)) {
-                            finalChannelCount = newFormat.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
-                        }
+            var outIndex = codec.dequeueOutputBuffer(info, 10000)
+            while (outIndex != android.media.MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (outIndex >= 0) {
+                    if ((info.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        outputEOS = true
                     }
-                    outIndex = codec.dequeueOutputBuffer(info, 10000)
+
+                    val insideStart = info.presentationTimeUs >= adjustedStartUs - 100000L
+                    val insideEnd = adjustedEndUs == 0L || info.presentationTimeUs <= adjustedEndUs + 100000L
+                    if (info.size > 0 && insideStart && insideEnd) {
+                        val outBuffer = codec.getOutputBuffer(outIndex)!!
+                        outBuffer.position(info.offset)
+                        outBuffer.limit(info.offset + info.size)
+                        val chunk = ByteArray(info.size)
+                        outBuffer.get(chunk)
+                        pcmData.write(chunk)
+                    }
+
+                    codec.releaseOutputBuffer(outIndex, false)
+                    if (outputEOS) break
+                } else if (outIndex == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val newFormat = codec.outputFormat
+                    if (newFormat.containsKey(android.media.MediaFormat.KEY_SAMPLE_RATE)) {
+                        finalSampleRate = newFormat.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+                    }
+                    if (newFormat.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)) {
+                        finalChannelCount = newFormat.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+                    }
                 }
+                outIndex = codec.dequeueOutputBuffer(info, 10000)
             }
-
-            codec.stop()
-            codec.release()
-            pcmDataBytes = pcmData.toByteArray()
         }
-        extractor.release()
 
+        val bytes = pcmData.toByteArray()
+        if (bytes.isNotEmpty()) DecodedPcm(bytes, finalSampleRate, finalChannelCount) else null
     } catch (e: Exception) {
         e.printStackTrace()
+        null
+    } finally {
+        try { codec?.stop() } catch (e: Exception) {}
+        try { codec?.release() } catch (e: Exception) {}
+        try { extractor?.release() } catch (e: Exception) {}
+        try { pfd?.close() } catch (e: Exception) {}
+    }
+}
+
+private fun formatSeconds(timeMs: Long): String {
+    return String.format(Locale.US, "%.3f", timeMs / 1000.0)
+}
+
+private fun decodePcm16ToMonoFloat(decoded: DecodedPcm): FloatArray {
+    val byteCount = decoded.bytes.size - (decoded.bytes.size % 2)
+    if (byteCount <= 0) return FloatArray(0)
+
+    val shortBuffer = ByteBuffer.wrap(decoded.bytes, 0, byteCount).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+    val allSamples = ShortArray(shortBuffer.remaining())
+    shortBuffer.get(allSamples)
+
+    val channelCount = decoded.channelCount.coerceAtLeast(1)
+    val frameCount = allSamples.size / channelCount
+    if (frameCount <= 0) return FloatArray(0)
+
+    val mono = FloatArray(frameCount)
+    for (frame in 0 until frameCount) {
+        var sum = 0f
+        val base = frame * channelCount
+        for (channel in 0 until channelCount) {
+            sum += allSamples[base + channel] / 32768f
+        }
+        mono[frame] = sum / channelCount
+    }
+    return mono
+}
+
+private fun estimatePitchContourYin(
+    samples: FloatArray,
+    sampleRate: Int,
+    bucketCount: Int,
+    globalRms: Float
+): List<Float?> {
+    if (samples.isEmpty() || sampleRate <= 0 || bucketCount <= 0) return emptyList()
+
+    val minTau = (sampleRate / PITCH_MAX_HZ).roundToInt().coerceAtLeast(2)
+    val maxTau = (sampleRate / PITCH_MIN_HZ).roundToInt().coerceAtLeast(minTau + 1)
+    if (samples.size <= maxTau * 2) return List(bucketCount) { null }
+
+    val targetFrameSize = (sampleRate * 0.085f).roundToInt()
+    val frameSize = targetFrameSize.coerceIn(maxTau * 2, minOf(samples.size, 4096))
+    val minFrameRms = (globalRms * 0.10f).coerceIn(0.001f, 0.018f)
+    val rawPitches = MutableList<Float?>(bucketCount) { null }
+
+    for (bucket in 0 until bucketCount) {
+        val center = ((bucket + 0.5f) * samples.size / bucketCount).roundToInt()
+        val frameStart = (center - frameSize / 2).coerceIn(0, samples.size - frameSize)
+        rawPitches[bucket] = estimatePitchYinFrame(samples, frameStart, frameSize, sampleRate, minFrameRms)?.hz
     }
 
-    // Always fallback to FFmpeg extraction natively if MediaExtractor fails entirely
-    if (pcmDataBytes == null || pcmDataBytes!!.isEmpty()) {
-        try {
-            val tempWav = File(context.cacheDir, "temp_extract_${System.currentTimeMillis()}.wav")
-            val startSec = startTimeMs / 1000.0
+    return smoothPitchContour(rawPitches)
+}
 
-            val urlStr = if (uri.scheme == "file") uri.path!! else uri.toString()
-            val cmd = mutableListOf(
-                "-ss", startSec.toString(),
-                "-i", urlStr
-            )
+private fun estimatePitchYinFrame(
+    samples: FloatArray,
+    start: Int,
+    frameSize: Int,
+    sampleRate: Int,
+    minFrameRms: Float
+): PitchEstimate? {
+    if (start < 0 || start + frameSize > samples.size) return null
 
-            if (endTimeMs > 0) {
-                val durationSec = (endTimeMs - startTimeMs) / 1000.0
-                cmd.add("-t")
-                cmd.add(durationSec.toString())
+    val minTau = (sampleRate / PITCH_MAX_HZ).roundToInt().coerceAtLeast(2)
+    val maxTau = (sampleRate / PITCH_MIN_HZ).roundToInt().coerceAtMost(frameSize - 2)
+    if (maxTau <= minTau) return null
+
+    var mean = 0f
+    for (i in 0 until frameSize) mean += samples[start + i]
+    mean /= frameSize
+
+    var sumSq = 0.0
+    for (i in 0 until frameSize) {
+        val centered = samples[start + i] - mean
+        sumSq += (centered * centered).toDouble()
+    }
+    val rms = kotlin.math.sqrt(sumSq / frameSize).toFloat()
+    if (rms < minFrameRms) return null
+
+    val difference = FloatArray(maxTau + 1)
+    for (tau in 1..maxTau) {
+        var diff = 0f
+        val limit = frameSize - tau
+        var i = 0
+        while (i < limit) {
+            val delta = (samples[start + i] - mean) - (samples[start + i + tau] - mean)
+            diff += delta * delta
+            i++
+        }
+        difference[tau] = diff
+    }
+
+    val cmnd = FloatArray(maxTau + 1) { 1f }
+    var runningSum = 0f
+    for (tau in 1..maxTau) {
+        runningSum += difference[tau]
+        cmnd[tau] = if (runningSum > 0f) difference[tau] * tau / runningSum else 1f
+    }
+
+    var bestTau = -1
+    var tau = minTau
+    while (tau <= maxTau) {
+        if (cmnd[tau] < YIN_THRESHOLD) {
+            while (tau + 1 <= maxTau && cmnd[tau + 1] < cmnd[tau]) tau++
+            bestTau = tau
+            break
+        }
+        tau++
+    }
+
+    if (bestTau < 0) {
+        var minValue = Float.MAX_VALUE
+        var minIndex = -1
+        for (candidate in minTau..maxTau) {
+            if (cmnd[candidate] < minValue) {
+                minValue = cmnd[candidate]
+                minIndex = candidate
             }
+        }
+        if (minValue > 0.34f) return null
+        bestTau = minIndex
+    }
 
-            cmd.addAll(listOf(
-                "-vn",
-                "-acodec", "pcm_s16le",
-                "-ar", "44100",
-                "-ac", "1",
-                "-f", "wav",
-                "-y",
-                tempWav.absolutePath
-            ))
+    val refinedTau = parabolicTau(cmnd, bestTau)
+    if (refinedTau <= 0f) return null
 
-            val rc = FFmpeg.getInstance().execute(cmd.toTypedArray())
+    val hz = sampleRate / refinedTau
+    if (hz !in PITCH_MIN_HZ..PITCH_MAX_HZ) return null
 
-            if (rc == com.yausername.ffmpeg.FFmpeg.RETURN_CODE_SUCCESS && tempWav.exists()) {
-                val bytes = tempWav.readBytes()
-                if (bytes.size > 44) {
-                    pcmDataBytes = bytes.copyOfRange(44, bytes.size)
-                    finalSampleRate = 44100
-                    finalChannelCount = 1
-                }
+    val confidence = (1f - cmnd[bestTau]).coerceIn(0f, 1f)
+    if (confidence < 0.58f) return null
+
+    return PitchEstimate(hz, confidence)
+}
+
+private fun parabolicTau(values: FloatArray, tau: Int): Float {
+    if (tau <= 0 || tau >= values.lastIndex) return tau.toFloat()
+    val left = values[tau - 1]
+    val center = values[tau]
+    val right = values[tau + 1]
+    val denominator = left - 2f * center + right
+    if (kotlin.math.abs(denominator) < 0.000001f) return tau.toFloat()
+    return tau + 0.5f * (left - right) / denominator
+}
+
+private fun smoothPitchContour(raw: List<Float?>): List<Float?> {
+    if (raw.isEmpty()) return raw
+    val cleaned = raw.toMutableList()
+
+    for (i in cleaned.indices) {
+        val current = cleaned[i] ?: continue
+        val previous = cleaned.getOrNull(i - 1)
+        val next = cleaned.getOrNull(i + 1)
+        if (previous != null && next != null) {
+            val prevNextDistance = semitoneDistance(previous, next)
+            val prevCurrentDistance = semitoneDistance(previous, current)
+            val nextCurrentDistance = semitoneDistance(next, current)
+            if (prevNextDistance < 3f && prevCurrentDistance > 9f && nextCurrentDistance > 9f) {
+                cleaned[i] = kotlin.math.sqrt(previous * next)
             }
-            try { tempWav.delete() } catch (e: Exception) {}
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
-    val finalPcm = pcmDataBytes
-    if (finalPcm == null || finalPcm.isEmpty()) {
-        return Pair(resultAmps, resultPitches)
+    for (i in cleaned.indices) {
+        if (cleaned[i] != null) continue
+        val previousIndex = (i - 1 downTo maxOf(0, i - 5)).firstOrNull { cleaned[it] != null }
+        val nextIndex = (i + 1..minOf(cleaned.lastIndex, i + 5)).firstOrNull { cleaned[it] != null }
+        if (previousIndex != null && nextIndex != null) {
+            val previous = cleaned[previousIndex]!!
+            val next = cleaned[nextIndex]!!
+            if (semitoneDistance(previous, next) < 7f) {
+                val t = (i - previousIndex).toFloat() / (nextIndex - previousIndex).toFloat()
+                val logHz = kotlin.math.ln(previous.toDouble()) * (1.0 - t) + kotlin.math.ln(next.toDouble()) * t
+                cleaned[i] = Math.exp(logHz).toFloat()
+            }
+        }
     }
 
-    try {
-        val shortBuffer = ByteBuffer.wrap(finalPcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-        val allSamples = ShortArray(shortBuffer.remaining())
-        shortBuffer.get(allSamples)
+    return cleaned
+}
 
-        val monoSamples = if (finalChannelCount > 1) {
-            val mono = ShortArray(allSamples.size / finalChannelCount)
-            for (i in mono.indices) mono[i] = allSamples[i * finalChannelCount]
-            mono
-        } else allSamples
-
-        val samplesPerBucket = monoSamples.size / buckets
-        if (samplesPerBucket == 0) return Pair(resultAmps, resultPitches)
-
-        var maxGlobalAmp = 0f
-        val bucketAmps = FloatArray(buckets)
-
-        for (i in 0 until buckets) {
-            val startIndex = i * samplesPerBucket
-            val endIndex = if (i == buckets - 1) monoSamples.size else startIndex + samplesPerBucket
-
-            val length = endIndex - startIndex
-            var sumSq = 0.0
-            for (j in startIndex until endIndex) {
-                val s = monoSamples[j].toDouble()
-                sumSq += s * s
-            }
-
-            val rms = if (length > 0) Math.sqrt(sumSq / length).toFloat() else 0f
-            bucketAmps[i] = rms
-            if (rms > maxGlobalAmp) maxGlobalAmp = rms
-
-            val bucketSamples = monoSamples.copyOfRange(startIndex, endIndex)
-            resultPitches[i] = estimatePitch(bucketSamples, finalSampleRate, 1)
-        }
-
-        val smoothedPitches = MutableList<Float?>(buckets) { null }
-        for (i in 0 until buckets) {
-            val window = mutableListOf<Float>()
-            for (j in i - 2..i + 2) {
-                if (j in 0 until buckets) {
-                    val p = resultPitches[j]
-                    if (p != null) window.add(p)
-                }
-            }
-            if (window.isNotEmpty()) {
-                window.sort()
-                smoothedPitches[i] = window[window.size / 2]
-            }
-        }
-
-        for (i in 0 until buckets) {
-            resultAmps[i] = if (maxGlobalAmp > 0) (bucketAmps[i] / maxGlobalAmp).coerceIn(0.05f, 1f) else 0.05f
-            resultPitches[i] = smoothedPitches[i]
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-    }
-
-    return Pair(resultAmps, resultPitches)
+private fun semitoneDistance(a: Float, b: Float): Float {
+    return kotlin.math.abs(12.0 * kotlin.math.ln((a / b).toDouble()) / kotlin.math.ln(2.0)).toFloat()
 }
 
 fun estimatePitch(samples: ShortArray, sampleRate: Int, channels: Int = 1): Float? {
     if (samples.isEmpty()) return null
+    val channelCount = channels.coerceAtLeast(1)
+    val frameCount = samples.size / channelCount
+    if (frameCount <= 0) return null
 
-    val monoSamples = if (channels > 1) {
-        val mono = ShortArray(samples.size / channels)
-        for (i in mono.indices) {
-            mono[i] = samples[i * channels]
+    val mono = FloatArray(frameCount)
+    for (frame in 0 until frameCount) {
+        var sum = 0f
+        val base = frame * channelCount
+        for (channel in 0 until channelCount) {
+            sum += samples[base + channel] / 32768f
         }
-        mono
-    } else {
-        samples
+        mono[frame] = sum / channelCount
     }
-
-    // Safely remove the DC offset (Crucial for Microphone Recordings)
-    var sum = 0.0
-    for (s in monoSamples) sum += s
-    val mean = (sum / monoSamples.size).toInt()
-
-    val centeredSamples = ShortArray(monoSamples.size)
-    for (i in monoSamples.indices) {
-        centeredSamples[i] = (monoSamples[i] - mean).toShort()
-    }
-
-    val minPitch = 70
-    val maxPitch = 600
-
-    val maxPeriod = sampleRate / minPitch
-    val minPeriod = sampleRate / maxPitch
-
-    if (centeredSamples.size <= maxPeriod) return null
 
     var sumSq = 0.0
-    for (s in centeredSamples) {
-        val v = s.toDouble()
-        sumSq += v * v
-    }
-    val rms = Math.sqrt(sumSq / centeredSamples.size).toFloat()
+    for (sample in mono) sumSq += (sample * sample).toDouble()
+    val rms = kotlin.math.sqrt(sumSq / mono.size).toFloat()
+    return estimatePitchYinFrame(mono, 0, mono.size, sampleRate, (rms * 0.10f).coerceAtLeast(0.001f))?.hz
+}
 
-    // Reduced from 30f to 15f to allow slightly softer microphone volumes
-    if (rms < 15f) return null 
+private fun pitchDisplayScale(pitches: List<Float?>): PitchScale? {
+    val logs = pitches
+        .mapNotNull { pitch -> pitch?.takeIf { it in PITCH_MIN_HZ..PITCH_MAX_HZ } }
+        .map { kotlin.math.ln(it.toDouble()) }
+        .sorted()
 
-    var minDiff = Float.MAX_VALUE
-    var maxDiff = 0f
-    var bestPeriod = -1
+    if (logs.size < 2) return null
 
-    val frameSize = centeredSamples.size - maxPeriod
+    val low = percentile(logs, 0.05f)
+    val high = percentile(logs, 0.95f)
+    val minSpan = kotlin.math.ln(2.0) * (5.0 / 12.0)
+    val center = (low + high) / 2.0
+    val span = (high - low).coerceAtLeast(minSpan)
+    return PitchScale(center - span / 2.0, center + span / 2.0)
+}
 
-    for (period in minPeriod..maxPeriod) {
-        var diff = 0f
-        for (i in 0 until frameSize) {
-            diff += kotlin.math.abs(centeredSamples[i].toInt() - centeredSamples[i + period].toInt())
-        }
-        diff /= frameSize
+private fun pitchToNormalizedY(pitchHz: Float, scale: PitchScale): Float {
+    val logHz = kotlin.math.ln(pitchHz.coerceIn(PITCH_MIN_HZ, PITCH_MAX_HZ).toDouble())
+    return (1.0 - ((logHz - scale.minLogHz) / (scale.maxLogHz - scale.minLogHz))).toFloat().coerceIn(0f, 1f)
+}
 
-        if (diff < minDiff) {
-            minDiff = diff
-            bestPeriod = period
-        }
-        if (diff > maxDiff) {
-            maxDiff = diff
-        }
-    }
+private fun percentile(sortedValues: List<Float>, percentile: Float): Float {
+    if (sortedValues.isEmpty()) return 0f
+    val index = ((sortedValues.lastIndex) * percentile.coerceIn(0f, 1f)).roundToInt()
+    return sortedValues[index.coerceIn(sortedValues.indices)]
+}
 
-    // Relaxed threshold heavily from 0.45f -> 0.75f to account for microphone noise
-    if (maxDiff == 0f || (minDiff / maxDiff) > 0.75f) {
-        return null
-    }
-
-    return if (bestPeriod > 0) sampleRate.toFloat() / bestPeriod else null
+private fun percentile(sortedValues: List<Double>, percentile: Float): Double {
+    if (sortedValues.isEmpty()) return 0.0
+    val index = ((sortedValues.lastIndex) * percentile.coerceIn(0f, 1f)).roundToInt()
+    return sortedValues[index.coerceIn(sortedValues.indices)]
 }
 
 fun exportRecording(context: Context, file: File) {
@@ -2826,6 +4526,21 @@ fun parseSimpleSubtitles(context: Context, uri: Uri): List<SubtitleCue> {
         }
     } catch (e: Exception) { e.printStackTrace() }
     return cues
+}
+
+fun findSubtitleCue(cues: List<SubtitleCue>, timeMs: Long): SubtitleCue? {
+    var low = 0
+    var high = cues.lastIndex
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        val cue = cues[mid]
+        when {
+            timeMs < cue.startMs -> high = mid - 1
+            timeMs > cue.endMs -> low = mid + 1
+            else -> return cue
+        }
+    }
+    return null
 }
 
 fun parseTimeMs(timeStr: String): Long {

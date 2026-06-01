@@ -15,8 +15,8 @@ android {
         applicationId = "com.selxo.rougo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 6
+        versionName = "V2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,8 +26,13 @@ android {
             isEnable = true
             reset()
             include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-            isUniversalApk = true
+            isUniversalApk = false
         }
+    }
+
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
 
     signingConfigs {
@@ -43,6 +48,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            keepDebugSymbols += listOf("**/libffmpeg.zip.so", "**/libpython.zip.so")
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -57,7 +63,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -94,14 +101,11 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     // LibVLC for Android (Handles Video/Audio Playback safely)
-    implementation("org.videolan.android:libvlc-all:3.5.1")
+    implementation(libs.libvlc.all)
 
     // YoutubeDL-Android (For downloading/streaming functionality)
-    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
-    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
-    // Core KTX & Lifecycles (Usually already there in a new project)
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
+    implementation(libs.youtubedl.library)
+    implementation(libs.youtubedl.ffmpeg)
     implementation(project(":hoshidicts"))
 
 }
