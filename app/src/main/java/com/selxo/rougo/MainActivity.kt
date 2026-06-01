@@ -937,7 +937,8 @@ private data class YoutubeSetupData(
     val title: String,
     val fallbackUrl: String?,
     val formats: List<YoutubeStreamFormat>,
-    val subtitleChoices: List<YoutubeSubtitleChoice>
+    val subtitleChoices: List<YoutubeSubtitleChoice>,
+    val thumbnailUrl: String? = null
 )
 
 private data class YoutubeResolutionOption(val key: String, val label: String)
@@ -951,7 +952,6 @@ private const val PREF_SUBTITLE_OFFSET_MS = "subtitle_offset_ms"
 private const val PREF_LIGHT_MODE = "app_light_mode"
 private const val PREF_THEME_MODE = "app_theme_mode"
 private const val PREF_ACCENT_COLOR = "app_accent_color"
-private const val PREF_ONBOARDING_SEEN = "onboarding_seen_v2"
 private const val DEFAULT_SKIP_SECONDS = 5
 private const val DEFAULT_SUBTITLE_OFFSET_MS = 0L
 private const val THEME_DARK = "dark"
@@ -1250,11 +1250,11 @@ class MainActivity : ComponentActivity() {
                             onAccentColorChanged = { accent ->
                                 accentColor = accent
                                 prefs.edit { putString(PREF_ACCENT_COLOR, accent) }
-                            }
+                            },
+                            systemDark = systemDark
                         )
                         CrashReportDialog()
                         UpdateNotificationDialog()
-                        OnboardingDialog()
                     }
                 }
             }
@@ -1416,17 +1416,10 @@ fun UpdateNotificationDialog() {
 }
 
 @Composable
-fun OnboardingDialog() {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
-    var showDialog by remember { mutableStateOf(!prefs.getBoolean(PREF_ONBOARDING_SEEN, false)) }
-
+fun HelpDialog(showDialog: Boolean, onDismiss: () -> Unit) {
     if (showDialog) {
         AlertDialog(
-            onDismissRequest = {
-                prefs.edit { putBoolean(PREF_ONBOARDING_SEEN, true) }
-                showDialog = false
-            },
+            onDismissRequest = onDismiss,
             title = { Text("Welcome to 朗語", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1438,10 +1431,7 @@ fun OnboardingDialog() {
                 }
             },
             confirmButton = {
-                Button(onClick = {
-                    prefs.edit { putBoolean(PREF_ONBOARDING_SEEN, true) }
-                    showDialog = false
-                }) { Text("Start") }
+                Button(onClick = onDismiss) { Text("Done") }
             }
         )
     }
@@ -1456,7 +1446,8 @@ fun MainAppFlow(
     themeMode: String,
     onThemeModeChanged: (String) -> Unit,
     accentColor: String,
-    onAccentColorChanged: (String) -> Unit
+    onAccentColorChanged: (String) -> Unit,
+    systemDark: Boolean
 ) {
     val context = LocalContext.current
     val libraryManager = remember { LibraryManager(context) }
@@ -1466,7 +1457,16 @@ fun MainAppFlow(
     var manualVideoUrl by remember { mutableStateOf<String?>(null) }
 
     val pendingVideoUrl = sharedUrl ?: manualVideoUrl
-    if (pendingVideoUrl != null) {
+    if (pendingVideoUrl != null && isNativeDirectWebPlaybackUrl(pendingVideoUrl)) {
+        LaunchedEffect(pendingVideoUrl) {
+            val newItem = createDirectWebLibraryItem(pendingVideoUrl)
+            libraryManager.saveItem(newItem)
+            libraryItems = libraryManager.getItems()
+            if (sharedUrl != null) onSharedUrlProcessed() else manualVideoUrl = null
+            activeItem = newItem
+            currentScreen = AppScreen.Player
+        }
+    } else if (pendingVideoUrl != null) {
         YtStreamDialog(
             url = pendingVideoUrl,
             onDismiss = {
@@ -1502,7 +1502,8 @@ fun MainAppFlow(
             themeMode = themeMode,
             onThemeModeChanged = onThemeModeChanged,
             accentColor = accentColor,
-            onAccentColorChanged = onAccentColorChanged
+            onAccentColorChanged = onAccentColorChanged,
+            systemDark = systemDark
         )
     } else if (currentScreen == AppScreen.DictionarySettings) {
         BackHandler { currentScreen = AppScreen.Settings }
@@ -1527,6 +1528,7 @@ fun MainAppFlow(
 @Composable
 fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem) -> Unit) {
     val context = LocalContext.current
+    val uiScope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
     val preferredResolution = remember {
         prefs.getString(PREF_YOUTUBE_RESOLUTION, DEFAULT_YOUTUBE_RESOLUTION) ?: DEFAULT_YOUTUBE_RESOLUTION
@@ -1572,7 +1574,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                         null
                     }
 
-                    onComplete(createYoutubeLibraryItem(fetchedSetupData, format, subtitleUri, url))
+                    onComplete(createYoutubeLibraryItem(context, fetchedSetupData, format, subtitleUri, url))
                 } else {
                     status = "Preferred quality unavailable. Pick another format."
                 }
@@ -1585,7 +1587,9 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
     }
 
     fun openSelectedFormat(format: YoutubeStreamFormat, subtitleUri: String?) {
-        onComplete(createYoutubeLibraryItem(setupData, format, subtitleUri, url))
+        uiScope.launch {
+            onComplete(createYoutubeLibraryItem(context, setupData, format, subtitleUri, url))
+        }
     }
 
     suspend fun resolveSelectedSubtitle(): String? {
@@ -1737,6 +1741,41 @@ private fun isYoutubeUrl(url: String): Boolean {
     return host.contains("youtube.com") || host.contains("youtu.be")
 }
 
+private fun isBilibiliUrl(url: String): Boolean {
+    val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
+    return host.contains("bilibili.com") || host == "b23.tv" || host.endsWith(".b23.tv")
+}
+
+private fun isNiconicoUrl(url: String): Boolean {
+    val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
+    return host.contains("nicovideo.jp") || host.contains("nico.ms")
+}
+
+private fun isNativeDirectWebPlaybackUrl(url: String): Boolean {
+    return isBilibiliUrl(url) || isNiconicoUrl(url)
+}
+
+private fun createDirectWebLibraryItem(url: String): LibraryItem {
+    val host = runCatching { Uri.parse(url).host.orEmpty().removePrefix("www.") }.getOrDefault("")
+    val title = when {
+        isBilibiliUrl(url) -> "Bilibili Video"
+        isNiconicoUrl(url) -> "Niconico Video"
+        host.isNotBlank() -> host
+        else -> "Web Video"
+    }
+    return LibraryItem(
+        id = UUID.randomUUID().toString(),
+        title = title,
+        mediaUri = url,
+        subtitleUri = null,
+        progress = 0L,
+        duration = 0L,
+        isVideo = true,
+        sourceUrl = null,
+        formatId = null
+    )
+}
+
 private fun addFastYoutubeOptions(context: Context, request: YoutubeDLRequest, sourceUrl: String, skipDownload: Boolean = true): YoutubeDLRequest {
     val cacheDir = File(context.cacheDir, "yt-dlp-cache").apply { mkdirs() }
     val configured = request
@@ -1760,18 +1799,22 @@ private fun fetchYoutubeSetupData(context: Context, url: String): YoutubeSetupDa
         title = json.optString("title", "YouTube Stream"),
         fallbackUrl = json.optString("url").takeIf { it.isNotBlank() },
         formats = parseYoutubeFormats(json),
-        subtitleChoices = parseYoutubeSubtitleChoices(json)
+        subtitleChoices = parseYoutubeSubtitleChoices(json),
+        thumbnailUrl = bestThumbnailUrl(json)
     )
 }
 
-private fun createYoutubeLibraryItem(
+private suspend fun createYoutubeLibraryItem(
+    context: Context,
     setupData: YoutubeSetupData?,
     format: YoutubeStreamFormat,
     subtitleUri: String?,
     sourceUrl: String
-): LibraryItem {
-    return LibraryItem(
-        id = UUID.randomUUID().toString(),
+): LibraryItem = withContext(Dispatchers.IO) {
+    val itemId = UUID.randomUUID().toString()
+    val coverArtPath = setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
+    LibraryItem(
+        id = itemId,
         title = setupData?.title ?: "YouTube Stream",
         mediaUri = format.url ?: format.manifestUrl ?: setupData?.fallbackUrl ?: sourceUrl,
         subtitleUri = subtitleUri,
@@ -1779,8 +1822,43 @@ private fun createYoutubeLibraryItem(
         duration = 0L,
         isVideo = format.vcodec != "none",
         sourceUrl = sourceUrl,
-        formatId = format.formatId
+        formatId = format.formatId,
+        coverArtPath = coverArtPath
     )
+}
+
+private fun bestThumbnailUrl(json: JSONObject): String? {
+    val thumbnails = json.optJSONArray("thumbnails")
+    if (thumbnails != null && thumbnails.length() > 0) {
+        var bestUrl: String? = null
+        var bestArea = -1
+        for (i in 0 until thumbnails.length()) {
+            val item = thumbnails.optJSONObject(i) ?: continue
+            val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
+            val area = item.optInt("width", 0) * item.optInt("height", 0)
+            if (area >= bestArea) {
+                bestUrl = url
+                bestArea = area
+            }
+        }
+        if (!bestUrl.isNullOrBlank()) return bestUrl
+    }
+    return json.optString("thumbnail").takeIf { it.isNotBlank() }
+}
+
+private fun downloadRemoteCover(context: Context, itemId: String, url: String): String? {
+    return try {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.connectTimeout = 10000
+        connection.readTimeout = 15000
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+        if (connection.responseCode !in 200..299) return null
+        val bytes = connection.inputStream.use { it.readBytes() }
+        if (bytes.isEmpty() || bytes.size > 8 * 1024 * 1024) return null
+        cacheCoverBytes(context, itemId, bytes)
+    } catch (e: Exception) {
+        null
+    }
 }
 
 private fun youtubeResolutionLabel(key: String): String {
@@ -1930,6 +2008,7 @@ private fun selectPreferredYoutubeFormat(
 }
 
 private fun resolveYoutubeStreamUrl(context: Context, url: String, formatId: String?): String? {
+    if (isNativeDirectWebPlaybackUrl(url)) return url
     val json = fetchYoutubeInfoJson(context, url)
     val targetFormat = parseYoutubeFormats(json).firstOrNull { it.formatId == formatId }
     return targetFormat?.url ?: targetFormat?.manifestUrl ?: json.optString("url").takeIf { it.isNotBlank() }
@@ -1975,11 +2054,11 @@ private fun downloadYoutubeSubtitle(context: Context, url: String, languageCode:
     }
 }
 
-private fun downloadVideoLinkToLibraryItem(context: Context, url: String): LibraryItem? {
+private fun downloadVideoLinkToLibraryItem(context: Context, url: String, existingItem: LibraryItem? = null): LibraryItem? {
     if (!ensureMediaToolsReady(context)) return null
 
     val setupData = runCatching { fetchYoutubeSetupData(context, url) }.getOrNull()
-    val itemId = UUID.randomUUID().toString()
+    val itemId = existingItem?.id ?: UUID.randomUUID().toString()
     val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoDownloads").apply { mkdirs() }
     val fileId = itemId.replace(Regex("[^A-Za-z0-9_-]"), "_")
 
@@ -1997,17 +2076,21 @@ private fun downloadVideoLinkToLibraryItem(context: Context, url: String): Libra
 
         val mediaUri = Uri.fromFile(downloadedFile)
         val metadata = extractMediaMetadata(context, mediaUri, itemId, isVideo = true)
-        val fallbackTitle = setupData?.title ?: downloadedFile.nameWithoutExtension
+        val fallbackTitle = setupData?.title ?: existingItem?.title ?: downloadedFile.nameWithoutExtension
         val baseItem = LibraryItem(
             id = itemId,
             title = fallbackTitle,
             mediaUri = mediaUri.toString(),
-            subtitleUri = null,
-            progress = 0L,
+            subtitleUri = existingItem?.subtitleUri,
+            progress = existingItem?.progress ?: 0L,
             duration = metadata.durationMs ?: 0L,
             isVideo = true,
             sourceUrl = null,
-            formatId = null
+            formatId = null,
+            recordings = existingItem?.recordings ?: emptyList(),
+            coverArtPath = metadata.coverArtPath
+                ?: setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
+                ?: existingItem?.coverArtPath
         )
         mergeMetadataIntoItem(baseItem, metadata, fallbackTitle)
     } catch (t: Throwable) {
@@ -2322,8 +2405,10 @@ fun LibraryScreen(
     var showSortMenu by remember { mutableStateOf(false) }
     var attemptedMetadataRefresh by remember { mutableStateOf(false) }
     var showLinkDialog by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
     var linkText by remember { mutableStateOf("") }
     var isDownloadingLink by remember { mutableStateOf(false) }
+    var downloadingItemId by remember { mutableStateOf<String?>(null) }
 
     val filteredItems = remember(items, searchQuery, selectedFilter, sortMode) {
         val query = searchQuery.trim().lowercase(Locale.US)
@@ -2438,8 +2523,13 @@ fun LibraryScreen(
                         fontSize = 12.sp
                     )
                 }
-                IconButton(onClick = onOpenSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.primary)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { showHelpDialog = true }) {
+                        Icon(Icons.Default.HelpOutline, contentDescription = "Help", tint = MaterialTheme.colorScheme.primary)
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
 
@@ -2537,12 +2627,39 @@ fun LibraryScreen(
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(filteredItems, key = { it.id }) { item ->
-                        LibraryCard(item, onClick = { onItemClick(item) }, onDelete = { onDelete(item) })
+                        LibraryCard(
+                            item = item,
+                            onClick = { onItemClick(item) },
+                            onDelete = { onDelete(item) },
+                            isDownloading = downloadingItemId == item.id,
+                            onDownload = item.sourceUrl?.let { sourceUrl ->
+                                {
+                                    if (downloadingItemId == null) {
+                                        downloadingItemId = item.id
+                                        importScope.launch {
+                                            val downloadedItem = withContext(Dispatchers.IO) {
+                                                downloadVideoLinkToLibraryItem(context, sourceUrl, item)
+                                            }
+                                            if (downloadedItem != null) {
+                                                libraryManager.saveItem(downloadedItem)
+                                                onRefresh()
+                                                Toast.makeText(context, "Downloaded video.", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                                            }
+                                            downloadingItemId = null
+                                        }
+                                    }
+                                }
+                            }
+                        )
                     }
                 }
             }
         }
     }
+
+    HelpDialog(showDialog = showHelpDialog, onDismiss = { showHelpDialog = false })
 
     if (showAddDialog) {
         AlertDialog(
@@ -2640,16 +2757,25 @@ fun SettingsScreen(
     themeMode: String,
     onThemeModeChanged: (String) -> Unit,
     accentColor: String,
-    onAccentColorChanged: (String) -> Unit
+    onAccentColorChanged: (String) -> Unit,
+    systemDark: Boolean
 ) {
     val context = LocalContext.current
     val engine = remember { DictionaryEngine.getInstance(context) }
     val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    val settingsScope = rememberCoroutineScope()
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "V2.1"
+        }.getOrNull() ?: "V2.2"
     }
+    val usesDarkSurfaces = when (themeMode) {
+        THEME_LIGHT -> false
+        THEME_SYSTEM -> systemDark
+        else -> true
+    }
+    var manualUpdateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var isCheckingUpdate by remember { mutableStateOf(false) }
     var noiseCancelEnabled by remember { mutableStateOf(engine.isNoiseCancellationEnabled()) }
     var preferredYoutubeResolution by remember {
         mutableStateOf(prefs.getString(PREF_YOUTUBE_RESOLUTION, DEFAULT_YOUTUBE_RESOLUTION) ?: DEFAULT_YOUTUBE_RESOLUTION)
@@ -2729,7 +2855,7 @@ fun SettingsScreen(
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(ACCENT_OPTIONS) { option ->
                             val selected = accentColor == option.key
-                            val swatch = if (themeMode == THEME_LIGHT) option.lightColor else option.darkColor
+                            val swatch = if (usesDarkSurfaces) option.darkColor else option.lightColor
                             Box(
                                 modifier = Modifier
                                     .size(34.dp)
@@ -2941,13 +3067,53 @@ fun SettingsScreen(
                 Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(16.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text("Version", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                         Text("$appVersion (朗語)", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                    TextButton(
+                        enabled = !isCheckingUpdate,
+                        onClick = {
+                            isCheckingUpdate = true
+                            settingsScope.launch {
+                                val info = withContext(Dispatchers.IO) { checkForUpdates() }
+                                val pInfo = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+                                if (info != null && pInfo != null && isUpdateAvailable(info, pInfo.versionName, pInfo.lastUpdateTime)) {
+                                    manualUpdateInfo = info
+                                } else {
+                                    Toast.makeText(context, "朗語 is up to date.", Toast.LENGTH_SHORT).show()
+                                }
+                                prefs.edit { putLong("last_update_check", System.currentTimeMillis()) }
+                                isCheckingUpdate = false
+                            }
+                        }
+                    ) {
+                        if (isCheckingUpdate) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Check")
+                        }
                     }
                 }
             }
         }
+    }
+
+    manualUpdateInfo?.let { info ->
+        AlertDialog(
+            onDismissRequest = { manualUpdateInfo = null },
+            title = { Text("Update Available (${info.tagName})", fontWeight = FontWeight.Bold) },
+            text = { Text(info.body.ifBlank { "A new version of 朗語 is available." }, fontSize = 12.sp) },
+            confirmButton = {
+                Button(onClick = {
+                    manualUpdateInfo = null
+                    downloadAndInstallUpdate(context, info.downloadUrl)
+                }) { Text("Update Now") }
+            },
+            dismissButton = {
+                TextButton(onClick = { manualUpdateInfo = null }) { Text("Later") }
+            }
+        )
     }
 }
 
@@ -3092,6 +3258,10 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     var parsedAudioCues by remember { mutableStateOf<List<SubtitleCue>>(emptyList()) }
     var isParsingSubtitles by remember { mutableStateOf(libraryItem.subtitleUri != null) }
     var currentSubtitleText by remember { mutableStateOf("") }
+    var youtubeSubtitleChoices by remember(libraryItem.id) { mutableStateOf<List<YoutubeSubtitleChoice>>(emptyList()) }
+    var isLoadingYoutubeSubtitleChoices by remember(libraryItem.id) { mutableStateOf(false) }
+    var youtubeSubtitleChoicesLoaded by remember(libraryItem.id) { mutableStateOf(false) }
+    var selectedYoutubeSubtitleKey by remember(libraryItem.id) { mutableStateOf<String?>(null) }
 
     val albumArt = if (libraryItem.sourceUrl == null) {
         loadAlbumArt(context, libraryItem.mediaUri, libraryItem.isVideo, libraryItem.coverArtPath)
@@ -3115,6 +3285,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     val initialPlayableUri = remember(libraryItem.id) { initialPlayableMediaUri(libraryItem) }
     var actualMediaUri by remember(libraryItem.id) { mutableStateOf(initialPlayableUri) }
     var isRefreshingStream by remember(libraryItem.id) { mutableStateOf(libraryItem.sourceUrl != null && initialPlayableUri == null) }
+    var streamRefreshAttempts by remember(libraryItem.id) { mutableIntStateOf(0) }
     var resumePlaybackAfterPause by remember { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -3341,6 +3512,20 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         }
     }
 
+    fun toggleBothSegment(segment: ShadowRecording) {
+        if (activeBothSegment?.id == segment.id) {
+            activeBothSegment = null
+            try { vlcPlayer.pause() } catch (e: Exception) {}
+            if (activeVoiceSegmentId == segment.id) {
+                try { voiceAudioPlayer.pause() } catch (e: Exception) {}
+                activeVoiceSegmentId = null
+            }
+        } else {
+            activeOriginalSegment = null
+            activeBothSegment = segment
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             try { vlcPlayer.stop() } catch (e: Exception) {}
@@ -3405,6 +3590,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             withContext(Dispatchers.IO) {
                 parsedAudioCues = parseSimpleSubtitles(context, libraryItem.subtitleUri!!.toUri())
             }
+            isParsingSubtitles = false
+        } else {
+            parsedAudioCues = emptyList()
             isParsingSubtitles = false
         }
     }
@@ -3483,8 +3671,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     VLCMediaPlayer.Event.EncounteredError -> {
                         isPlaying = false
                         val sourceUrl = libraryItem.sourceUrl
-                        if (sourceUrl != null && !isRefreshingStream) {
+                        if (sourceUrl != null && !isRefreshingStream && streamRefreshAttempts < 1) {
                             uiScope.launch {
+                                streamRefreshAttempts += 1
                                 isRefreshingStream = true
                                 val refreshedUri = withContext(Dispatchers.IO) {
                                     try {
@@ -3652,35 +3841,48 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 delay(350)
             }
         } finally {
-            shadowAudioRecorder?.let { recorder ->
-                try { recorder.stop() } catch (e: Exception) {}
-                try { recorder.release() } catch (e: Exception) {}
-                shadowAudioRecorder = null
-                isRecording = false
-                try { File(tempFilePath).delete() } catch (e: Exception) {}
+            if (shadowAudioRecorder != null && tempFilePath.isNotBlank()) {
+                stopRecordingSafe(
+                    currentFilePath = tempFilePath,
+                    startTimeOverride = segment.startTime,
+                    endTimeOverride = vlcPlayer.time.coerceAtLeast(segment.startTime),
+                    pausePlayer = true,
+                    showShortToast = false
+                )
             }
             try { vlcPlayer.pause() } catch (e: Exception) {}
         }
     }
 
     LaunchedEffect(Unit) {
+        var lastFrameMs = 0L
+        var lastPolledMainPos = currentPos
         while (true) {
             val activeTimeline = isPlaying || voiceAudioPlayer.isPlaying || activeOriginalSegment != null || activeBothSegment != null || repeatPracticeSegment != null
             if (activeTimeline) {
-                withFrameMillis { }
-            }
+                val frameMs = withFrameMillis { it }
+                if (isPlaying || activeOriginalSegment != null || activeBothSegment != null || repeatPracticeSegment != null) {
+                    val polledPos = vlcPlayer.time.coerceAtLeast(0L)
+                    val frameDelta = if (lastFrameMs > 0L) (frameMs - lastFrameMs).coerceIn(0L, 100L) else 0L
+                    currentPos = if (polledPos == lastPolledMainPos && frameDelta > 0L && duration > 0L) {
+                        (currentPos + frameDelta).coerceAtMost(duration)
+                    } else {
+                        polledPos
+                    }
+                    lastPolledMainPos = polledPos
+                }
 
-            if (isPlaying || activeOriginalSegment != null || activeBothSegment != null || repeatPracticeSegment != null) {
-                currentPos = vlcPlayer.time
-            }
-
-            if (activeVoiceSegmentId != null || activeBothSegment != null) {
-                voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
+                if (activeVoiceSegmentId != null || activeBothSegment != null) {
+                    voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
+                } else {
+                    voiceCurrentPos = -1L
+                }
+                lastFrameMs = frameMs
             } else {
-                voiceCurrentPos = -1L
+                lastFrameMs = 0L
+                lastPolledMainPos = currentPos
+                delay(250)
             }
-
-            if (!activeTimeline) delay(250)
         }
     }
 
@@ -3748,6 +3950,70 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
                         LaunchedEffect(showSubMenu) {
                             if (showSubMenu) spuTracks = vlcPlayer.spuTracks ?: emptyArray()
+                        }
+
+                        LaunchedEffect(showSubMenu, libraryItem.sourceUrl) {
+                            val sourceUrl = libraryItem.sourceUrl
+                            if (showSubMenu && sourceUrl != null && !youtubeSubtitleChoicesLoaded && !isLoadingYoutubeSubtitleChoices) {
+                                isLoadingYoutubeSubtitleChoices = true
+                                youtubeSubtitleChoices = withContext(Dispatchers.IO) {
+                                    runCatching { fetchYoutubeSetupData(context, sourceUrl).subtitleChoices }.getOrDefault(emptyList())
+                                }
+                                youtubeSubtitleChoicesLoaded = true
+                                isLoadingYoutubeSubtitleChoices = false
+                            }
+                        }
+
+                        if (libraryItem.sourceUrl != null) {
+                            if (isLoadingYoutubeSubtitleChoices) {
+                                DropdownMenuItem(
+                                    text = { Text("Loading YouTube Captions...") },
+                                    enabled = false,
+                                    onClick = {}
+                                )
+                            } else if (youtubeSubtitleChoices.isEmpty() && youtubeSubtitleChoicesLoaded) {
+                                DropdownMenuItem(
+                                    text = { Text("No YouTube Captions Found") },
+                                    enabled = false,
+                                    onClick = {}
+                                )
+                            } else {
+                                youtubeSubtitleChoices.forEach { choice ->
+                                    val choiceKey = "${choice.languageCode}:${choice.isAutoGenerated}"
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                if (selectedYoutubeSubtitleKey == choiceKey) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    Spacer(Modifier.width(8.dp))
+                                                }
+                                                Text(choice.label)
+                                            }
+                                        },
+                                        onClick = {
+                                            val sourceUrl = libraryItem.sourceUrl ?: return@DropdownMenuItem
+                                            showSubMenu = false
+                                            selectedYoutubeSubtitleKey = choiceKey
+                                            uiScope.launch {
+                                                isParsingSubtitles = true
+                                                val subtitleUri = withContext(Dispatchers.IO) {
+                                                    downloadYoutubeSubtitle(context, sourceUrl, choice.languageCode, choice.isAutoGenerated)
+                                                }
+                                                if (subtitleUri != null) {
+                                                    libraryItem = libraryItem.copy(subtitleUri = subtitleUri)
+                                                    isSubtitlesVisible = true
+                                                    LibraryManager(context).saveItem(libraryItem)
+                                                } else {
+                                                    Toast.makeText(context, "Subtitle download failed.", Toast.LENGTH_SHORT).show()
+                                                    isParsingSubtitles = false
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+
+                            HorizontalDivider()
                         }
 
                         val visibleTracks = spuTracks.filter { it.id != -1 }
@@ -3979,12 +4245,14 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             context = context,
                             originalMediaUri = actualMediaUri ?: libraryItem.mediaUri,
                             onPlayOriginal = {
+                                activeBothSegment = null
                                 activeOriginalSegment = if (activeOriginalSegment?.id == latest.id) null else latest
                             },
-                            onPlayVoice = { toggleVoiceSegment(latest) },
-                            onPlayBoth = {
-                                activeBothSegment = if (activeBothSegment?.id == latest.id) null else latest
+                            onPlayVoice = {
+                                activeBothSegment = null
+                                toggleVoiceSegment(latest)
                             },
+                            onPlayBoth = { toggleBothSegment(latest) },
                             onSeekOriginal = { targetMs -> seekMainPlayer(targetMs, resumeAfterSeek = false) },
                             onSeekVoice = { targetMs -> seekVoiceSegment(latest, targetMs) },
                             onRepeatPractice = {
@@ -4004,8 +4272,8 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             isRepeatPracticeActive = repeatPracticeSegment?.id == latest.id,
                             currentOriginalTime = currentPos,
                             currentRecordedTime = if (activeVoiceSegmentId == latest.id) voiceCurrentPos else -1L,
-                            isOriginalPlaying = activeOriginalSegment?.id == latest.id,
-                            isRecordedPlaying = activeVoiceSegmentId == latest.id && voiceAudioPlayer.isPlaying,
+                            isOriginalPlaying = activeOriginalSegment?.id == latest.id || activeBothSegment?.id == latest.id,
+                            isRecordedPlaying = (activeVoiceSegmentId == latest.id && voiceAudioPlayer.isPlaying) || activeBothSegment?.id == latest.id,
                             isBothPlaying = activeBothSegment?.id == latest.id
                         )
                     }
@@ -4039,12 +4307,14 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             context = context,
                             originalMediaUri = actualMediaUri ?: libraryItem.mediaUri,
                             onPlayOriginal = {
+                                activeBothSegment = null
                                 activeOriginalSegment = if (activeOriginalSegment?.id == rec.id) null else rec
                             },
-                            onPlayVoice = { toggleVoiceSegment(rec) },
-                            onPlayBoth = {
-                                activeBothSegment = if (activeBothSegment?.id == rec.id) null else rec
+                            onPlayVoice = {
+                                activeBothSegment = null
+                                toggleVoiceSegment(rec)
                             },
+                            onPlayBoth = { toggleBothSegment(rec) },
                             onSeekOriginal = { targetMs -> seekMainPlayer(targetMs, resumeAfterSeek = false) },
                             onSeekVoice = { targetMs -> seekVoiceSegment(rec, targetMs) },
                             onRepeatPractice = {
@@ -4064,8 +4334,8 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             isRepeatPracticeActive = repeatPracticeSegment?.id == rec.id,
                             currentOriginalTime = currentPos,
                             currentRecordedTime = if (activeVoiceSegmentId == rec.id) voiceCurrentPos else -1L,
-                            isOriginalPlaying = activeOriginalSegment?.id == rec.id,
-                            isRecordedPlaying = activeVoiceSegmentId == rec.id && voiceAudioPlayer.isPlaying,
+                            isOriginalPlaying = activeOriginalSegment?.id == rec.id || activeBothSegment?.id == rec.id,
+                            isRecordedPlaying = (activeVoiceSegmentId == rec.id && voiceAudioPlayer.isPlaying) || activeBothSegment?.id == rec.id,
                             isBothPlaying = activeBothSegment?.id == rec.id
                         )
                     }
@@ -4420,11 +4690,20 @@ fun AudioWaveformComparison(
     isLoading: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier = modifier.fillMaxWidth().background(Color(0xFF1E1E24), RoundedCornerShape(8.dp)).padding(8.dp)) {
+    val accent = MaterialTheme.colorScheme.primary
+    val recordedColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+            .padding(8.dp)
+    ) {
         WaveformTrack(
             amplitudes = originalAmplitudes,
             pitches = originalPitches,
-            color = Color(0xFF5E5CE6),
+            color = accent,
+            pitchColor = MaterialTheme.colorScheme.secondary,
+            cursorColor = accent,
             label = "Original",
             onClick = onPlayOriginal,
             onSeek = onSeekOriginal,
@@ -4436,7 +4715,9 @@ fun AudioWaveformComparison(
         WaveformTrack(
             amplitudes = recordedAmplitudes,
             pitches = recordedPitches,
-            color = Color(0xFF8E8E93),
+            color = recordedColor,
+            pitchColor = MaterialTheme.colorScheme.secondary,
+            cursorColor = accent,
             label = "Recorded",
             onClick = onPlayVoice,
             onSeek = onSeekVoice,
@@ -4452,6 +4733,8 @@ fun WaveformTrack(
     amplitudes: List<Float>,
     pitches: List<Float?>? = null,
     color: Color,
+    pitchColor: Color,
+    cursorColor: Color,
     label: String,
     onClick: () -> Unit,
     onSeek: (Float) -> Unit = {},
@@ -4539,7 +4822,7 @@ fun WaveformTrack(
                 }
                 drawPath(
                     path = pitchPath,
-                    color = Color(0xFF00E5FF),
+                    color = pitchColor,
                     style = androidx.compose.ui.graphics.drawscope.Stroke(
                         width = 2.5.dp.toPx(),
                         cap = androidx.compose.ui.graphics.StrokeCap.Round,
@@ -4551,7 +4834,7 @@ fun WaveformTrack(
             if (progress > 0f) {
                 val cursorX = size.width * progress.coerceIn(0f, 1f)
                 drawLine(
-                    color = Color(0xFFAEB2FF),
+                    color = cursorColor,
                     start = androidx.compose.ui.geometry.Offset(cursorX, 0f),
                     end = androidx.compose.ui.geometry.Offset(cursorX, size.height),
                     strokeWidth = 2.dp.toPx()
@@ -4563,10 +4846,16 @@ fun WaveformTrack(
 }
 
 @Composable
-fun LibraryCard(item: LibraryItem, onClick: () -> Unit, onDelete: () -> Unit) {
+fun LibraryCard(
+    item: LibraryItem,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+    onDownload: (() -> Unit)? = null,
+    isDownloading: Boolean = false
+) {
     val context = LocalContext.current
     val progressPct = if (item.duration > 0) (item.progress.toFloat() / item.duration.toFloat()) else 0f
-    val albumArt = if (item.sourceUrl == null) loadAlbumArt(context, item.mediaUri, item.isVideo, item.coverArtPath) else null
+    val albumArt = loadAlbumArt(context, item.mediaUri, item.isVideo, item.coverArtPath)
     val metadataLine = item.metadataSummary()
     val itemType = when {
         item.sourceUrl != null -> "YouTube"
@@ -4639,8 +4928,27 @@ fun LibraryCard(item: LibraryItem, onClick: () -> Unit, onDelete: () -> Unit) {
                     trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
             }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(
+                modifier = Modifier.width(48.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (onDownload != null) {
+                    IconButton(
+                        onClick = onDownload,
+                        enabled = !isDownloading,
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        if (isDownloading) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Download, contentDescription = "Download", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
             }
         }
     }

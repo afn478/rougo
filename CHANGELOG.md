@@ -1,5 +1,19 @@
 # Changelog
 
+## V2.2 - 2026-06-01
+
+- Fixed Play Both state so the original and recorded waveform controls both switch to pause while the paired segment is active.
+- Smoothed player timeline updates between VLC time events so video and recording cursors animate at the same frame cadence.
+- Added on-demand YouTube caption selection from the player subtitle menu.
+- Prevented Bilibili and Niconico links from getting trapped in the expiring stream resolver loop.
+- Added video/link thumbnails in the library when a cover or remote thumbnail is available.
+- Added a spaced download action under each stream item delete button.
+- Replaced automatic onboarding with a help button in the Library header.
+- Added a manual Check for Updates button in Settings.
+- Saved partial recordings when repeat mode is stopped mid-attempt.
+- Updated waveform and pitch overlay colors to follow the selected accent theme.
+- Fixed System theme accent swatches to reflect the current system light/dark state.
+
 ## V2.1 - 2026-06-01
 
 - Replaced the launcher icon with the new microphone/reader artwork.
