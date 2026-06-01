@@ -2648,7 +2648,7 @@ fun SettingsScreen(
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "V2"
+        }.getOrNull() ?: "V2.1"
     }
     var noiseCancelEnabled by remember { mutableStateOf(engine.isNoiseCancellationEnabled()) }
     var preferredYoutubeResolution by remember {
