@@ -25,6 +25,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Size
 import android.util.Log
@@ -292,9 +293,30 @@ private fun LibraryItem.metadataSummary(): String? {
 }
 
 private fun LibraryItem.needsLocalMetadataRefresh(): Boolean {
-    if (sourceUrl != null) return false
+    if (sourceUrl != null && !hasDownloadedLocalCopy()) return false
     val hasCover = coverArtPath?.let { File(it).exists() && File(it).length() > 0L } == true
     return !hasCover || metadataSummary() == null || duration <= 0L
+}
+
+private fun isLocalMediaUriValue(value: String): Boolean {
+    val scheme = runCatching { Uri.parse(value).scheme?.lowercase(Locale.US) }.getOrNull()
+    return scheme.isNullOrBlank() || scheme == "file" || scheme == "content"
+}
+
+private fun LibraryItem.hasDownloadedLocalCopy(): Boolean {
+    val media = mediaUri.trim()
+    val source = sourceUrl?.trim().orEmpty()
+    return source.isNotBlank() && media.isNotBlank() && media != source && isLocalMediaUriValue(media)
+}
+
+private fun LibraryItem.displaySourceLabel(): String {
+    val source = sourceUrl
+    return when {
+        source != null && hasDownloadedLocalCopy() -> "${streamSourceLabel(source)} (local)"
+        source != null -> streamSourceLabel(source)
+        isVideo -> "Video"
+        else -> "Audio"
+    }
 }
 
 object ImageCache {
@@ -1138,11 +1160,20 @@ private fun parseGithubTimestamp(value: String): Long {
 
 fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
     val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+    val downloadsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: run {
+        Toast.makeText(context, "Update storage is unavailable.", Toast.LENGTH_LONG).show()
+        return
+    }
+    cleanupOldUpdateApks(downloadsDir)
+    val fileName = updateDownloadFileName(downloadUrl)
+    val destinationFile = File(downloadsDir, fileName)
+    try { destinationFile.delete() } catch (e: Exception) {}
     val request = DownloadManager.Request(Uri.parse(downloadUrl))
         .setTitle("朗語 Update")
         .setDescription("Downloading latest version...")
+        .setMimeType("application/vnd.android.package-archive")
         .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "update.apk")
+        .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
         .setAllowedOverMetered(true)
         .setAllowedOverRoaming(true)
 
@@ -1152,7 +1183,11 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
         override fun onReceive(context: Context, intent: Intent) {
             val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
             if (id == downloadId) {
-                installApk(context)
+                if (isDownloadSuccessful(downloadManager, downloadId) && destinationFile.exists() && destinationFile.length() > 0L) {
+                    installApk(context, destinationFile)
+                } else {
+                    Toast.makeText(context, "Update download failed.", Toast.LENGTH_LONG).show()
+                }
                 try { context.unregisterReceiver(this) } catch (e: Exception) {}
             }
         }
@@ -1166,8 +1201,40 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
     }
 }
 
-fun installApk(context: Context) {
-    val file = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk")
+private fun updateDownloadFileName(downloadUrl: String): String {
+    val rawName = Uri.parse(downloadUrl).lastPathSegment
+        ?.substringAfterLast('/')
+        ?.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        ?.takeIf { it.isNotBlank() && it.endsWith(".apk", ignoreCase = true) }
+        ?: "update.apk"
+    return "rougo-${System.currentTimeMillis()}-$rawName"
+}
+
+private fun cleanupOldUpdateApks(downloadsDir: File?) {
+    downloadsDir?.listFiles()
+        ?.filter { file ->
+            file.isFile &&
+                file.extension.equals("apk", ignoreCase = true) &&
+                (file.name == "update.apk" || file.name.startsWith("rougo-"))
+        }
+        ?.forEach { file ->
+            try { file.delete() } catch (e: Exception) {}
+        }
+}
+
+private fun isDownloadSuccessful(downloadManager: DownloadManager, downloadId: Long): Boolean {
+    return try {
+        downloadManager.query(DownloadManager.Query().setFilterById(downloadId))?.use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            statusIndex >= 0 && cursor.getInt(statusIndex) == DownloadManager.STATUS_SUCCESSFUL
+        } ?: false
+    } catch (e: Exception) {
+        false
+    }
+}
+
+fun installApk(context: Context, file: File = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk")) {
     if (file.exists()) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -1289,6 +1356,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
@@ -1950,7 +2018,7 @@ private fun showPlayerNotification(
     val contentIntent = PendingIntent.getActivity(
         context,
         0,
-        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
         flags
     )
     val timeText = "${formatTime(currentPos)} / ${formatTime(duration)}"
@@ -2122,8 +2190,8 @@ private fun downloadVideoLinkToLibraryItem(context: Context, url: String, existi
             progress = existingItem?.progress ?: 0L,
             duration = metadata.durationMs ?: 0L,
             isVideo = true,
-            sourceUrl = null,
-            formatId = null,
+            sourceUrl = existingItem?.sourceUrl ?: url,
+            formatId = existingItem?.formatId,
             recordings = existingItem?.recordings ?: emptyList(),
             coverArtPath = metadata.coverArtPath
                 ?: setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
@@ -2666,13 +2734,15 @@ fun LibraryScreen(
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(filteredItems, key = { it.id }) { item ->
-                        val downloadState = downloadStates[item.id] ?: LibraryDownloadState.Idle
+                        val hasLocalCopy = item.hasDownloadedLocalCopy()
+                        val downloadState = downloadStates[item.id]
+                            ?: if (hasLocalCopy) LibraryDownloadState.Complete else LibraryDownloadState.Idle
                         LibraryCard(
                             item = item,
                             onClick = { onItemClick(item) },
                             onDelete = { onDelete(item) },
                             downloadState = downloadState,
-                            onDownload = item.sourceUrl?.let { sourceUrl ->
+                            onDownload = item.sourceUrl?.takeUnless { hasLocalCopy }?.let { sourceUrl ->
                                 {
                                     if (downloadState != LibraryDownloadState.Loading) {
                                         downloadStates[item.id] = LibraryDownloadState.Loading
@@ -3304,7 +3374,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     var youtubeSubtitleChoicesLoaded by remember(libraryItem.id) { mutableStateOf(false) }
     var selectedYoutubeSubtitleKey by remember(libraryItem.id) { mutableStateOf<String?>(null) }
 
-    val albumArt = if (libraryItem.sourceUrl == null) {
+    val albumArt = if (libraryItem.sourceUrl == null || libraryItem.hasDownloadedLocalCopy()) {
         loadAlbumArt(context, libraryItem.mediaUri, libraryItem.isVideo, libraryItem.coverArtPath)
     } else {
         null
@@ -3651,22 +3721,45 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     return@let
                 }
 
+                val segmentDuration = (segment.endTime - segment.startTime).coerceAtLeast(1L)
                 vlcPlayer.time = segment.startTime
                 currentPos = segment.startTime
+                voiceCurrentPos = 0L
+
+                val playRequestedAtMs = SystemClock.elapsedRealtime()
                 vlcPlayer.play()
                 isPlaying = true
 
-                var playWaitCount = 0
-                while (!vlcPlayer.isPlaying && playWaitCount < 12) {
-                    delay(16)
-                    playWaitCount++
+                while (
+                    !vlcPlayer.isPlaying &&
+                    SystemClock.elapsedRealtime() - playRequestedAtMs < 180L &&
+                    activeBothSegment?.id == segment.id
+                ) {
+                    delay(10)
                 }
-                delay(40)
+
+                val originalOffsetAtStart = (vlcPlayer.time - segment.startTime).coerceIn(0L, segmentDuration)
+                if (originalOffsetAtStart > 20L) {
+                    try { voiceAudioPlayer.seekTo(originalOffsetAtStart.toInt()) } catch (e: Exception) {}
+                    voiceCurrentPos = originalOffsetAtStart
+                }
+
                 if (activeBothSegment?.id == segment.id) {
                     voiceAudioPlayer.start()
                 }
 
-                while (activeBothSegment?.id == segment.id && vlcPlayer.time < segment.endTime) { delay(25) }
+                while (activeBothSegment?.id == segment.id && vlcPlayer.time < segment.endTime) {
+                    val originalOffset = (vlcPlayer.time - segment.startTime).coerceIn(0L, segmentDuration)
+                    if (voiceAudioPlayer.isPlaying) {
+                        val voiceOffset = voiceAudioPlayer.currentPosition.toLong().coerceAtLeast(0L)
+                        val drift = originalOffset - voiceOffset
+                        if (kotlin.math.abs(drift) > 120L && originalOffset < segmentDuration - 50L) {
+                            try { voiceAudioPlayer.seekTo(originalOffset.toInt()) } catch (e: Exception) {}
+                            voiceCurrentPos = originalOffset
+                        }
+                    }
+                    delay(25)
+                }
             } finally {
                 vlcPlayer.pause()
                 if (activeVoiceSegmentId == segment.id && voiceAudioPlayer.isPlaying) {
@@ -3971,7 +4064,11 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     lastPolledMainPos = polledPos
                 }
 
-                if (activeVoiceSegmentId != null || activeBothSegment != null) {
+                val pairedSegment = activeBothSegment
+                if (pairedSegment != null) {
+                    val pairedDuration = (pairedSegment.endTime - pairedSegment.startTime).coerceAtLeast(1L)
+                    voiceCurrentPos = (currentPos - pairedSegment.startTime).coerceIn(0L, pairedDuration)
+                } else if (activeVoiceSegmentId != null) {
                     voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
                 } else {
                     voiceCurrentPos = -1L
@@ -4370,7 +4467,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onShare = { exportRecording(context, File(latest.filePath)) },
                             isRepeatPracticeActive = repeatPracticeSegment?.id == latest.id,
                             currentOriginalTime = currentPos,
-                            currentRecordedTime = if (activeVoiceSegmentId == latest.id) voiceCurrentPos else -1L,
+                            currentRecordedTime = if (activeVoiceSegmentId == latest.id || activeBothSegment?.id == latest.id) voiceCurrentPos else -1L,
                             isOriginalPlaying = activeOriginalSegment?.id == latest.id || activeBothSegment?.id == latest.id,
                             isRecordedPlaying = (activeVoiceSegmentId == latest.id && voiceAudioPlayer.isPlaying) || activeBothSegment?.id == latest.id,
                             isBothPlaying = activeBothSegment?.id == latest.id
@@ -4432,7 +4529,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onShare = { exportRecording(context, File(rec.filePath)) },
                             isRepeatPracticeActive = repeatPracticeSegment?.id == rec.id,
                             currentOriginalTime = currentPos,
-                            currentRecordedTime = if (activeVoiceSegmentId == rec.id) voiceCurrentPos else -1L,
+                            currentRecordedTime = if (activeVoiceSegmentId == rec.id || activeBothSegment?.id == rec.id) voiceCurrentPos else -1L,
                             isOriginalPlaying = activeOriginalSegment?.id == rec.id || activeBothSegment?.id == rec.id,
                             isRecordedPlaying = (activeVoiceSegmentId == rec.id && voiceAudioPlayer.isPlaying) || activeBothSegment?.id == rec.id,
                             isBothPlaying = activeBothSegment?.id == rec.id
@@ -4619,6 +4716,11 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
     var results by remember { mutableStateOf<List<DictEntry>>(emptyList()) }
     var searchQuery by remember { mutableStateOf(query) }
     var isSearching by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        delay(50)
+        runCatching { sheetState.partialExpand() }
+    }
 
     LaunchedEffect(searchQuery) {
         isSearching = true
@@ -4956,11 +5058,7 @@ fun LibraryCard(
     val progressPct = if (item.duration > 0) (item.progress.toFloat() / item.duration.toFloat()) else 0f
     val albumArt = loadAlbumArt(context, item.mediaUri, item.isVideo, item.coverArtPath)
     val metadataLine = item.metadataSummary()
-    val itemType = when {
-        item.sourceUrl != null -> streamSourceLabel(item.sourceUrl)
-        item.isVideo -> "Video"
-        else -> "Audio"
-    }
+    val itemType = item.displaySourceLabel()
 
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
@@ -5000,7 +5098,15 @@ fun LibraryCard(
                         label = { Text(itemType, fontSize = 11.sp) },
                         leadingIcon = {
                             Icon(
-                                if (item.sourceUrl != null) Icons.Default.Cloud else if (item.isVideo) Icons.Default.Movie else Icons.Default.Audiotrack,
+                                if (item.hasDownloadedLocalCopy()) {
+                                    Icons.Default.CheckCircle
+                                } else if (item.sourceUrl != null) {
+                                    Icons.Default.Cloud
+                                } else if (item.isVideo) {
+                                    Icons.Default.Movie
+                                } else {
+                                    Icons.Default.Audiotrack
+                                },
                                 contentDescription = null,
                                 modifier = Modifier.size(14.dp)
                             )

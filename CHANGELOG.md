@@ -1,5 +1,13 @@
 # Changelog
 
+## V2.4 - 2026-06-02
+
+- Reused the existing app task when a link is shared into Rougo instead of creating stacked app instances.
+- Kept downloaded YouTube/Bilibili/Niconico videos attached to their original source category and labeled them as local copies.
+- Hardened self-update downloads so stale APKs are removed, DownloadManager success is verified, and the exact downloaded APK is installed.
+- Opened dictionary lookup to the partial bottom-sheet state first instead of covering the whole screen immediately.
+- Tightened Play Both sync by starting both players together, correcting drift, and driving paired cursors from the original timeline.
+
 ## V2.3 - 2026-06-01
 
 - Fixed light mode system bars so status/navigation icons switch to dark.

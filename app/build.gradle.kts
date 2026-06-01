@@ -15,8 +15,8 @@ android {
         applicationId = "com.selxo.rougo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 12
-        versionName = "V2.3"
+        versionCode = 13
+        versionName = "V2.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
