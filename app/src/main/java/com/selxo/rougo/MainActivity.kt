@@ -12,6 +12,7 @@ import androidx.core.content.FileProvider
 import java.net.HttpURLConnection
 import java.net.URL
 import android.Manifest
+import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -26,6 +27,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.util.Size
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -91,11 +93,16 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
+import kotlin.system.exitProcess
 
 // --- YT-DLP IMPORTS ---
 import com.yausername.ffmpeg.FFmpeg
@@ -113,6 +120,109 @@ import org.videolan.libvlc.util.VLCVideoLayout
 // ==========================================
 // 1. DATA MODELS & DICTIONARY ENGINE
 // ==========================================
+
+class RougoApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        CrashReporter.install(this)
+    }
+}
+
+object CrashReporter {
+    private const val TAG = "RougoCrash"
+    private const val CRASH_FILE_NAME = "last_crash.txt"
+    private const val HANDLED_FILE_NAME = "handled_errors.txt"
+
+    @Volatile
+    private var installed = false
+
+    fun install(context: Context) {
+        if (installed) return
+        installed = true
+
+        val appContext = context.applicationContext
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                writeCrash(appContext, thread, throwable)
+                Log.e(TAG, "Uncaught exception on ${thread.name}", throwable)
+            } catch (loggingError: Throwable) {
+                loggingError.printStackTrace()
+            }
+
+            if (previousHandler != null) {
+                previousHandler.uncaughtException(thread, throwable)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+                exitProcess(10)
+            }
+        }
+    }
+
+    fun readLastCrash(context: Context): String? {
+        return try {
+            crashFile(context).takeIf { it.exists() && it.length() > 0L }?.readText()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun clearLastCrash(context: Context) {
+        try { crashFile(context).delete() } catch (e: Exception) {}
+    }
+
+    fun recordHandled(context: Context, area: String, throwable: Throwable) {
+        try {
+            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.US).format(Date())
+            handledFile(context).appendText(
+                buildString {
+                    appendLine("[$timestamp] $area")
+                    appendLine(stackTraceToString(throwable))
+                    appendLine()
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not write handled error", e)
+        }
+    }
+
+    private fun writeCrash(context: Context, thread: Thread, throwable: Throwable) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.US).format(Date())
+        val packageInfo = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }.getOrNull()
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo?.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo?.versionCode?.toLong()
+        }
+
+        crashFile(context).writeText(
+            buildString {
+                appendLine("朗語 crash report")
+                appendLine("Time: $timestamp")
+                appendLine("App: ${packageInfo?.versionName ?: "unknown"} ($versionCode)")
+                appendLine("Package: ${context.packageName}")
+                appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+                appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+                appendLine("Thread: ${thread.name} / ${thread.id}")
+                appendLine()
+                appendLine(stackTraceToString(throwable))
+            }
+        )
+    }
+
+    private fun stackTraceToString(throwable: Throwable): String {
+        val writer = StringWriter()
+        throwable.printStackTrace(PrintWriter(writer))
+        return writer.toString()
+    }
+
+    private fun crashFile(context: Context): File = File(context.filesDir, CRASH_FILE_NAME)
+
+    private fun handledFile(context: Context): File = File(context.filesDir, HANDLED_FILE_NAME)
+}
 
 data class DictEntry(
     val term: String,
@@ -692,46 +802,68 @@ class DictionaryEngine private constructor(private val context: Context) {
 }
 
 class LibraryManager(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("rougo_library", Context.MODE_PRIVATE)
 
     fun getItems(): List<LibraryItem> {
         val jsonString = prefs.getString("items", "[]") ?: "[]"
-        val jsonArray = JSONArray(jsonString)
+        val jsonArray = try {
+            JSONArray(jsonString)
+        } catch (e: Exception) {
+            CrashReporter.recordHandled(appContext, "LibraryManager.getItems root JSON", e)
+            JSONArray()
+        }
         val list = mutableListOf<LibraryItem>()
         for (i in 0 until jsonArray.length()) {
-            val obj = jsonArray.getJSONObject(i)
+            try {
+                val obj = jsonArray.getJSONObject(i)
+                val mediaUri = obj.optString("mediaUri").takeIf { it.isNotBlank() } ?: continue
 
-            val recordingsList = mutableListOf<ShadowRecording>()
-            if (obj.has("recordings")) {
-                val recArray = obj.getJSONArray("recordings")
-                for (j in 0 until recArray.length()) {
-                    val recObj = recArray.getJSONObject(j)
-                    recordingsList.add(
-                        ShadowRecording(
-                            id = recObj.optString("id", UUID.randomUUID().toString()),
-                            filePath = recObj.getString("filePath"),
-                            startTime = recObj.getLong("startTime"),
-                            endTime = recObj.getLong("endTime"),
-                            timestamp = recObj.optLong("timestamp", System.currentTimeMillis())
-                        )
-                    )
+                val recordingsList = mutableListOf<ShadowRecording>()
+                if (obj.has("recordings")) {
+                    val recArray = obj.optJSONArray("recordings") ?: JSONArray()
+                    for (j in 0 until recArray.length()) {
+                        try {
+                            val recObj = recArray.getJSONObject(j)
+                            val filePath = recObj.optString("filePath").takeIf { it.isNotBlank() } ?: continue
+                            recordingsList.add(
+                                ShadowRecording(
+                                    id = recObj.optString("id", UUID.randomUUID().toString()),
+                                    filePath = filePath,
+                                    startTime = recObj.optLong("startTime", 0L),
+                                    endTime = recObj.optLong("endTime", 0L),
+                                    timestamp = recObj.optLong("timestamp", System.currentTimeMillis())
+                                )
+                            )
+                        } catch (e: Exception) {
+                            CrashReporter.recordHandled(appContext, "LibraryManager.getItems recording $i/$j", e)
+                        }
+                    }
                 }
-            }
 
-            list.add(LibraryItem(
-                id = obj.getString("id"), title = obj.getString("title"), mediaUri = obj.getString("mediaUri"),
-                subtitleUri = if (obj.has("subtitleUri") && obj.getString("subtitleUri").isNotEmpty()) obj.getString("subtitleUri") else null,
-                progress = obj.getLong("progress"), duration = obj.getLong("duration"), isVideo = obj.getBoolean("isVideo"),
-                recordings = recordingsList,
-                sourceUrl = if (obj.has("sourceUrl") && obj.getString("sourceUrl").isNotEmpty()) obj.getString("sourceUrl") else null,
-                formatId = if (obj.has("formatId") && obj.getString("formatId").isNotEmpty()) obj.getString("formatId") else null,
-                artist = obj.optCleanString("artist"),
-                album = obj.optCleanString("album"),
-                albumArtist = obj.optCleanString("albumArtist"),
-                genre = obj.optCleanString("genre"),
-                year = obj.optCleanString("year"),
-                coverArtPath = obj.optCleanString("coverArtPath")
-            ))
+                list.add(
+                    LibraryItem(
+                        id = obj.optString("id").takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
+                        title = obj.optCleanString("title") ?: "Unknown Media",
+                        mediaUri = mediaUri,
+                        subtitleUri = obj.optString("subtitleUri").takeIf { it.isNotBlank() },
+                        progress = obj.optLong("progress", 0L),
+                        duration = obj.optLong("duration", 0L),
+                        isVideo = obj.optBoolean("isVideo", false),
+                        recordings = recordingsList,
+                        sourceUrl = obj.optString("sourceUrl").takeIf { it.isNotBlank() },
+                        formatId = obj.optString("formatId").takeIf { it.isNotBlank() },
+                        artist = obj.optCleanString("artist"),
+                        album = obj.optCleanString("album"),
+                        albumArtist = obj.optCleanString("albumArtist"),
+                        genre = obj.optCleanString("genre"),
+                        year = obj.optCleanString("year"),
+                        coverArtPath = obj.optCleanString("coverArtPath")
+                    )
+                )
+            } catch (e: Exception) {
+                CrashReporter.recordHandled(appContext, "LibraryManager.getItems item $i", e)
+            }
         }
         return list
     }
@@ -902,7 +1034,7 @@ suspend fun checkForUpdates(): UpdateInfo? = withContext(Dispatchers.IO) {
 fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
     val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
     val request = DownloadManager.Request(Uri.parse(downloadUrl))
-        .setTitle("Rougo Update")
+        .setTitle("朗語 Update")
         .setDescription("Downloading latest version...")
         .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "update.apk")
@@ -950,6 +1082,7 @@ class MainActivity : ComponentActivity() {
     private var sharedUrlState = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        CrashReporter.install(applicationContext)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
@@ -1006,6 +1139,7 @@ class MainActivity : ComponentActivity() {
                                 prefs.edit { putBoolean(PREF_LIGHT_MODE, enabled) }
                             }
                         )
+                        CrashReportDialog()
                         UpdateNotificationDialog()
                     }
                 }
@@ -1056,6 +1190,55 @@ fun isNewerVersion(remoteTag: String, currentVersion: String?): Boolean {
 }
 
 @Composable
+fun CrashReportDialog() {
+    val context = LocalContext.current
+    var crashText by remember { mutableStateOf(CrashReporter.readLastCrash(context)) }
+    val scrollState = rememberScrollState()
+
+    if (crashText != null) {
+        AlertDialog(
+            onDismissRequest = {
+                CrashReporter.clearLastCrash(context)
+                crashText = null
+            },
+            title = { Text("朗語 crashed last time", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(modifier = Modifier.heightIn(max = 320.dp).verticalScroll(scrollState)) {
+                    Text(
+                        "The crash report was saved so this can be debugged.",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        crashText.orEmpty().take(4000),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    copyTextToClipboard(context, "朗語 crash report", crashText.orEmpty())
+                    Toast.makeText(context, "Crash report copied", Toast.LENGTH_SHORT).show()
+                }) { Text("Copy") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    CrashReporter.clearLastCrash(context)
+                    crashText = null
+                }) { Text("Clear") }
+            }
+        )
+    }
+}
+
+private fun copyTextToClipboard(context: Context, label: String, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+    clipboard?.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+}
+
+@Composable
 fun UpdateNotificationDialog() {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
@@ -1084,7 +1267,7 @@ fun UpdateNotificationDialog() {
             title = { Text("Update Available (${updateInfo?.tagName})", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
-                    Text("A new version of Rougo Reader is available. Update now to access new features and bug fixes.")
+                    Text("A new version of 朗語 is available. Update now to access new features and bug fixes.")
                     if (updateInfo?.body?.isNotEmpty() == true) {
                         Spacer(Modifier.height(8.dp))
                         Text(updateInfo!!.body, fontSize = 12.sp, color = Color.Gray)
@@ -1410,7 +1593,7 @@ private fun createPlayerNotificationChannel(context: Context) {
         "Player controls",
         NotificationManager.IMPORTANCE_LOW
     ).apply {
-        description = "Playback controls for Rougo"
+        description = "Playback controls for 朗語"
         setShowBadge(false)
     }
     manager.createNotificationChannel(channel)
@@ -2059,7 +2242,7 @@ fun LibraryScreen(items: List<LibraryItem>, onRefresh: () -> Unit, onItemClick: 
                         Spacer(Modifier.height(12.dp))
                         Text("No media yet", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            "Add local audio/video or share a YouTube link into Rougo.",
+                            "Add local audio/video or share a YouTube link into 朗語.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             fontSize = 13.sp
@@ -2347,7 +2530,7 @@ fun SettingsScreen(
                     Spacer(Modifier.width(16.dp))
                     Column {
                         Text("Version", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                        Text("$appVersion (Rougo Reader)", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text("$appVersion (朗語)", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                 }
             }

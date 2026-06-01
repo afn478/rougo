@@ -14,7 +14,7 @@
 
 # Uncomment this to preserve the line number information for
 # debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+-keepattributes SourceFile,LineNumberTable
 
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
@@ -25,3 +25,7 @@
 -keep class org.videolan.libvlc.util.** { *; }
 -keep class com.yausername.youtubedl_android.** { *; }
 -keep class com.yausername.ffmpeg.** { *; }
+
+# Launcher/crash-reporting entry points must keep their manifest names in release builds.
+-keep class com.selxo.rougo.RougoApplication { *; }
+-keep class com.selxo.rougo.MainActivity { *; }

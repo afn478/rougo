@@ -51,6 +51,8 @@ jobs:
 
             - Loads embedded audiobook metadata for local media.
             - Extracts and caches embedded M4B cover art, including attached-picture streams.
+            - Adds startup crash reporting and hardens launcher entry points.
+            - Shows the installed app name as 朗語.
             - Keeps the app-visible version at V2.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
