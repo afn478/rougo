@@ -27,6 +27,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.text.Html
 import android.util.Size
 import android.util.Log
 import android.widget.Toast
@@ -66,6 +67,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -1169,8 +1171,8 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
     val destinationFile = File(downloadsDir, fileName)
     try { destinationFile.delete() } catch (e: Exception) {}
     val request = DownloadManager.Request(Uri.parse(downloadUrl))
-        .setTitle("朗語 Update")
-        .setDescription("Downloading latest version...")
+        .setTitle(fileName)
+        .setDescription("Downloading Rougo update...")
         .setMimeType("application/vnd.android.package-archive")
         .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
@@ -1183,8 +1185,9 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
         override fun onReceive(context: Context, intent: Intent) {
             val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
             if (id == downloadId) {
-                if (isDownloadSuccessful(downloadManager, downloadId) && destinationFile.exists() && destinationFile.length() > 0L) {
-                    installApk(context, destinationFile)
+                val downloadedFile = resolveDownloadedUpdateFile(downloadManager, downloadId, destinationFile)
+                if (isDownloadSuccessful(downloadManager, downloadId) && downloadedFile.exists() && downloadedFile.length() > 0L) {
+                    installApk(context, downloadedFile)
                 } else {
                     Toast.makeText(context, "Update download failed.", Toast.LENGTH_LONG).show()
                 }
@@ -1202,24 +1205,87 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
 }
 
 private fun updateDownloadFileName(downloadUrl: String): String {
-    val rawName = Uri.parse(downloadUrl).lastPathSegment
+    var rawName = Uri.parse(downloadUrl).lastPathSegment
         ?.substringAfterLast('/')
         ?.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        ?.takeIf { it.isNotBlank() && it.endsWith(".apk", ignoreCase = true) }
-        ?: "update.apk"
-    return "rougo-${System.currentTimeMillis()}-$rawName"
+        ?.takeIf { it.isNotBlank() }
+        ?: "update"
+    if (rawName.endsWith(".apk", ignoreCase = true)) {
+        rawName = rawName.dropLast(4)
+    }
+    val safeBaseName = rawName.trim('.', '_', '-').ifBlank { "update" }
+    return "rougo-${System.currentTimeMillis()}-$safeBaseName.apk"
 }
 
 private fun cleanupOldUpdateApks(downloadsDir: File?) {
     downloadsDir?.listFiles()
         ?.filter { file ->
             file.isFile &&
-                file.extension.equals("apk", ignoreCase = true) &&
-                (file.name == "update.apk" || file.name.startsWith("rougo-"))
+                (
+                    file.name.equals("update", ignoreCase = true) ||
+                        file.name.equals("update.apk", ignoreCase = true) ||
+                        file.name.startsWith("rougo-")
+                )
         }
         ?.forEach { file ->
             try { file.delete() } catch (e: Exception) {}
         }
+}
+
+private fun resolveDownloadedUpdateFile(downloadManager: DownloadManager, downloadId: Long, expectedApkFile: File): File {
+    if (expectedApkFile.exists() && expectedApkFile.length() > 0L) return expectedApkFile
+    val downloadedFile = queryDownloadedFile(downloadManager, downloadId)
+    return if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0L) {
+        ensureUpdateApkExtension(downloadedFile, expectedApkFile)
+    } else {
+        expectedApkFile
+    }
+}
+
+private fun queryDownloadedFile(downloadManager: DownloadManager, downloadId: Long): File? {
+    return try {
+        downloadManager.query(DownloadManager.Query().setFilterById(downloadId))?.use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val localUriIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+            if (localUriIndex >= 0) {
+                val localUri = cursor.getString(localUriIndex)
+                if (!localUri.isNullOrBlank()) {
+                    val uri = Uri.parse(localUri)
+                    if (uri.scheme.equals("file", ignoreCase = true)) {
+                        uri.path?.let { return File(it) }
+                    }
+                }
+            }
+
+            val localFileIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_FILENAME)
+            if (localFileIndex >= 0) {
+                cursor.getString(localFileIndex)?.takeIf { it.isNotBlank() }?.let { return File(it) }
+            }
+            null
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+private fun ensureUpdateApkExtension(downloadedFile: File, expectedApkFile: File): File {
+    if (downloadedFile.name.endsWith(".apk", ignoreCase = true)) return downloadedFile
+    return try {
+        expectedApkFile.parentFile?.mkdirs()
+        try { expectedApkFile.delete() } catch (e: Exception) {}
+        if (downloadedFile.renameTo(expectedApkFile)) {
+            expectedApkFile
+        } else {
+            downloadedFile.inputStream().use { input ->
+                expectedApkFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            expectedApkFile
+        }
+    } catch (e: Exception) {
+        downloadedFile
+    }
 }
 
 private fun isDownloadSuccessful(downloadManager: DownloadManager, downloadId: Long): Boolean {
@@ -4575,6 +4641,8 @@ fun JapaneseClickableSubtitle(text: String, onWordClicked: (String) -> Unit) {
 
 @Composable
 fun PitchOverline(reading: String, pitchPosition: Int) {
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val annotationColor = MaterialTheme.colorScheme.onSurfaceVariant
     val morae = remember(reading) {
         val list = mutableListOf<String>()
         var i = 0
@@ -4601,24 +4669,25 @@ fun PitchOverline(reading: String, pitchPosition: Int) {
             val hasDrop = pitchPosition > 0 && i == pitchPosition - 1
 
             Box(contentAlignment = Alignment.TopStart) {
-                Text(mora, color = Color.White, fontSize = 20.sp)
+                Text(mora, color = textColor, fontSize = 20.sp)
                 androidx.compose.foundation.Canvas(modifier = Modifier.matchParentSize()) {
                     if (isHigh) {
-                        drawLine(Color.White, androidx.compose.ui.geometry.Offset(0f, 2.dp.toPx()), androidx.compose.ui.geometry.Offset(size.width, 2.dp.toPx()), 1.5.dp.toPx())
+                        drawLine(textColor, androidx.compose.ui.geometry.Offset(0f, 2.dp.toPx()), androidx.compose.ui.geometry.Offset(size.width, 2.dp.toPx()), 1.5.dp.toPx())
                     }
                     if (hasDrop) {
-                        drawLine(Color.White, androidx.compose.ui.geometry.Offset(size.width, 2.dp.toPx()), androidx.compose.ui.geometry.Offset(size.width, size.height * 0.6f), 1.5.dp.toPx())
+                        drawLine(textColor, androidx.compose.ui.geometry.Offset(size.width, 2.dp.toPx()), androidx.compose.ui.geometry.Offset(size.width, size.height * 0.6f), 1.5.dp.toPx())
                     }
                 }
             }
         }
         Spacer(Modifier.width(4.dp))
-        Text("[$pitchPosition]", color = Color.Gray, fontSize = 14.sp)
+        Text("[$pitchPosition]", color = annotationColor, fontSize = 14.sp)
     }
 }
 
 @Composable
 fun PitchDiagram(reading: String, pitchPosition: Int, modifier: Modifier = Modifier) {
+    val textColor = MaterialTheme.colorScheme.onSurface
     val morae = remember(reading) {
         val list = mutableListOf<String>()
         var i = 0
@@ -4635,7 +4704,6 @@ fun PitchDiagram(reading: String, pitchPosition: Int, modifier: Modifier = Modif
         list
     }
 
-    val textColor = Color.White
     val dotRadius = 4.dp
     val strokeWidth = 2.dp
     val moraWidth = 32.dp
@@ -4713,6 +4781,7 @@ fun PitchDiagram(reading: String, pitchPosition: Int, modifier: Modifier = Modif
 @Composable
 fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismiss: () -> Unit) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val colorScheme = MaterialTheme.colorScheme
     var results by remember { mutableStateOf<List<DictEntry>>(emptyList()) }
     var searchQuery by remember { mutableStateOf(query) }
     var isSearching by remember { mutableStateOf(false) }
@@ -4732,7 +4801,7 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
         onDismiss()
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = Color(0xFF1E1E24)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = colorScheme.surface) {
         Column(modifier = Modifier.fillMaxWidth().padding(16.dp).padding(bottom = 32.dp)) {
             OutlinedTextField(
                 value = searchQuery,
@@ -4740,12 +4809,19 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
                 label = { Text("Search Dictionary") },
                 modifier = Modifier.fillMaxWidth(),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedContainerColor = Color(0xFF2B2B36), unfocusedContainerColor = Color(0xFF2B2B36)
+                    focusedTextColor = colorScheme.onSurface,
+                    unfocusedTextColor = colorScheme.onSurface,
+                    focusedContainerColor = colorScheme.surface,
+                    unfocusedContainerColor = colorScheme.surface,
+                    focusedLabelColor = colorScheme.primary,
+                    unfocusedLabelColor = colorScheme.onSurfaceVariant,
+                    focusedBorderColor = colorScheme.primary,
+                    unfocusedBorderColor = colorScheme.onSurfaceVariant,
+                    cursorColor = colorScheme.primary
                 ),
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) { Icon(Icons.Default.Clear, contentDescription = "Clear") }
+                        IconButton(onClick = { searchQuery = "" }) { Icon(Icons.Default.Clear, contentDescription = "Clear", tint = colorScheme.onSurfaceVariant) }
                     }
                 }
             )
@@ -4755,7 +4831,7 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
             if (isSearching) {
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
             } else if (results.isEmpty()) {
-                Text("No results found.", color = Color.Gray, modifier = Modifier.align(Alignment.CenterHorizontally))
+                Text("No results found.", color = colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
             } else {
                 val grouped = results.groupBy { "${it.deinflected}|${it.reading}" }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -4773,21 +4849,23 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
 @Composable
 fun DictGroupCard(entries: List<DictEntry>) {
     val first = entries.first()
+    val colorScheme = MaterialTheme.colorScheme
+    val chipContainer = colorScheme.primary.copy(alpha = if (isSystemInDarkTheme()) 0.20f else 0.12f)
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF2A2A35)),
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceVariant),
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.Bottom) {
-                Text(first.deinflected, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(first.deinflected, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = colorScheme.onSurface)
 
                 if (first.reading.isNotEmpty() && first.reading != first.deinflected) {
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         "【${first.reading}】",
                         fontSize = 18.sp,
-                        color = Color(0xFFAEB2FF),
+                        color = colorScheme.primary,
                         modifier = Modifier.padding(bottom = 4.dp)
                     )
                 }
@@ -4799,11 +4877,11 @@ fun DictGroupCard(entries: List<DictEntry>) {
                 pitchesByDict.forEach { (dictName, pitches) ->
                     Column(modifier = Modifier.padding(bottom = 8.dp)) {
                         Surface(
-                            color = Color(0xFF5E5CE6).copy(alpha = 0.2f),
+                            color = chipContainer,
                             shape = RoundedCornerShape(4.dp),
                             modifier = Modifier.padding(bottom = 8.dp)
                         ) {
-                            Text(dictName, color = Color(0xFFAEB2FF), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                            Text(dictName, color = colorScheme.primary, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                         }
 
                         pitches.forEach { pitch ->
@@ -4820,58 +4898,175 @@ fun DictGroupCard(entries: List<DictEntry>) {
 
             val byDict = entries.groupBy { it.dictName }
             byDict.forEach { (dictName, dictEntries) ->
-                Surface(
-                    color = Color(0xFF5E5CE6).copy(alpha = 0.2f),
-                    shape = RoundedCornerShape(4.dp),
-                    modifier = Modifier.padding(vertical = 4.dp)
-                ) {
-                    Text(
-                        text = dictName,
-                        color = Color(0xFFAEB2FF),
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-
-                dictEntries.forEach { entry ->
-                    val processedDefinition = if (entry.definition.trim().startsWith("[") || entry.definition.trim().startsWith("{")) {
+                val processedDefinitions = dictEntries.map { entry ->
+                    if (entry.definition.trim().startsWith("[") || entry.definition.trim().startsWith("{")) {
                         convertStructuredToHtml(entry.definition)
                     } else {
                         entry.definition
                     }
-
-                    if (processedDefinition.contains("<")) {
-                        AndroidView(
-                            factory = { ctx ->
-                                android.webkit.WebView(ctx).apply {
-                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                                    settings.apply {
-                                        allowFileAccess = false
-                                        javaScriptEnabled = false
-                                    }
-                                    val html = """
-                                        <html><head><style>
-                                        body { color: #D0D0D0; font-size: 15px; font-family: sans-serif;
-                                               background: transparent; margin: 0; padding: 0; }
-                                        a { color: #AEB2FF; text-decoration: none; } 
-                                        ul, ol { padding-left: 20px; margin-top: 4px; }
-                                        li { margin-bottom: 4px; }
-                                        ruby rt { font-size: 0.6em; color: #AEB2FF; }
-                                        </style></head><body>$processedDefinition</body></html>
-                                    """.trimIndent()
-                                    loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 20.dp, max = 500.dp)
-                        )
-                    } else {
-                        Text(processedDefinition, color = Color.LightGray, fontSize = 15.sp, lineHeight = 22.sp, modifier = Modifier.padding(bottom = 8.dp))
-                    }
                 }
+                DictionaryEntrySection(
+                    dictName = dictName,
+                    processedDefinitions = processedDefinitions,
+                    chipContainer = chipContainer
+                )
                 Spacer(modifier = Modifier.height(8.dp))
             }
         }
     }
+}
+
+@Composable
+private fun DictionaryEntrySection(
+    dictName: String,
+    processedDefinitions: List<String>,
+    chipContainer: Color
+) {
+    var expanded by remember(dictName, processedDefinitions) { mutableStateOf(false) }
+    val colorScheme = MaterialTheme.colorScheme
+    val preview = remember(processedDefinitions) { firstDictionaryDefinitionLine(processedDefinitions) }
+    val expandable = remember(processedDefinitions, preview) { isExpandableDictionaryDefinition(processedDefinitions, preview) }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(enabled = expandable) { expanded = !expanded }
+                .padding(vertical = 4.dp)
+        ) {
+            Surface(
+                color = chipContainer,
+                shape = RoundedCornerShape(4.dp)
+            ) {
+                Text(
+                    text = dictName,
+                    color = colorScheme.primary,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                preview,
+                color = colorScheme.onSurfaceVariant,
+                fontSize = 14.sp,
+                lineHeight = 20.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (expandable) {
+                if (!expanded) {
+                    Text("...", color = colorScheme.onSurfaceVariant, fontSize = 14.sp, modifier = Modifier.padding(start = 4.dp))
+                }
+                Icon(
+                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse definition" else "Expand definition",
+                    tint = colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
+        if (expanded) {
+            Column(modifier = Modifier.padding(top = 6.dp, bottom = 8.dp)) {
+                processedDefinitions.forEachIndexed { index, processedDefinition ->
+                    if (index > 0) Spacer(modifier = Modifier.height(8.dp))
+                    ExpandedDictionaryDefinition(processedDefinition)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExpandedDictionaryDefinition(processedDefinition: String) {
+    val textColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val linkColor = MaterialTheme.colorScheme.primary
+
+    if (processedDefinition.contains("<")) {
+        val html = remember(processedDefinition, textColor, linkColor) {
+            """
+                <html><head><style>
+                body { color: ${textColor.toCssColor()}; font-size: 14px; font-family: sans-serif;
+                       background: transparent; margin: 0; padding: 0; line-height: 1.35; }
+                a { color: ${linkColor.toCssColor()}; text-decoration: none; }
+                ul, ol { padding-left: 0; margin: 4px 0 0 0; list-style-position: inside; }
+                li { margin: 0 0 4px 0; padding-left: 0; }
+                ruby rt { font-size: 0.6em; color: ${linkColor.toCssColor()}; }
+                </style></head><body>$processedDefinition</body></html>
+            """.trimIndent()
+        }
+        AndroidView(
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    settings.apply {
+                        allowFileAccess = false
+                        javaScriptEnabled = false
+                    }
+                }
+            },
+            update = { webView ->
+                webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 20.dp, max = 500.dp)
+        )
+    } else {
+        Text(
+            processedDefinition,
+            color = textColor,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+private fun firstDictionaryDefinitionLine(processedDefinitions: List<String>): String {
+    return processedDefinitions
+        .asSequence()
+        .flatMap { dictionaryDefinitionPlainText(it).lineSequence() }
+        .map { cleanDictionaryDefinitionLine(it) }
+        .firstOrNull { it.isNotBlank() }
+        ?.takeIf { it.isNotBlank() }
+        ?: "Definition"
+}
+
+private fun isExpandableDictionaryDefinition(processedDefinitions: List<String>, preview: String): Boolean {
+    val nonBlankLines = processedDefinitions
+        .asSequence()
+        .flatMap { dictionaryDefinitionPlainText(it).lineSequence() }
+        .map { cleanDictionaryDefinitionLine(it) }
+        .filter { it.isNotBlank() }
+        .toList()
+    val compactText = nonBlankLines.joinToString(" ")
+    return processedDefinitions.size > 1 ||
+        processedDefinitions.any { it.contains("<") } ||
+        nonBlankLines.size > 1 ||
+        compactText.length > preview.length ||
+        compactText.length > 72
+}
+
+private fun dictionaryDefinitionPlainText(processedDefinition: String): String {
+    return if (processedDefinition.contains("<")) {
+        Html.fromHtml(processedDefinition, Html.FROM_HTML_MODE_LEGACY).toString()
+    } else {
+        processedDefinition
+    }.replace('\u00A0', ' ')
+}
+
+private fun cleanDictionaryDefinitionLine(line: String): String {
+    return line
+        .trim()
+        .trimStart('•', '・', '-')
+        .trim()
+}
+
+private fun Color.toCssColor(): String {
+    return String.format(Locale.US, "#%06X", 0xFFFFFF and toArgb())
 }
 
 @Composable
