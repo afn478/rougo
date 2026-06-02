@@ -1,5 +1,11 @@
 # Changelog
 
+## V2.5 - 2026-06-03
+
+- Stabilized dictionary and playback flows.
+- Collapsed dictionary blocks for improved readability.
+- Improved APK update and download reliability.
+
 ## V2.4 - 2026-06-02
 
 - Reused the existing app task when a link is shared into Rougo instead of creating stacked app instances.
