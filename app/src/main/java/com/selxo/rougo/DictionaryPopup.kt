@@ -1,6 +1,8 @@
 package com.selxo.rougo
 
 import android.text.Html
+import android.text.method.LinkMovementMethod
+import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -59,6 +61,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -72,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
@@ -657,17 +661,58 @@ private fun DictionaryEntrySection(
         }
 
         if (expanded && sourceText.isNotBlank()) {
-            Text(
-                sourceText,
+            DictionaryDefinitionBody(
+                processedDefinitions = processedDefinitions,
                 color = colorScheme.onSurfaceVariant,
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 6.dp, bottom = 8.dp)
             )
         }
     }
+}
+
+@Composable
+private fun DictionaryDefinitionBody(
+    processedDefinitions: List<String>,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val definitions = remember(processedDefinitions) {
+        processedDefinitions.map { it.trim() }.filter { it.isNotBlank() }
+    }
+
+    Column(modifier = modifier) {
+        definitions.forEachIndexed { index, definition ->
+            if (index > 0) Spacer(modifier = Modifier.height(10.dp))
+            DictionaryHtmlText(definition = definition, color = color)
+        }
+    }
+}
+
+@Composable
+private fun DictionaryHtmlText(
+    definition: String,
+    color: Color
+) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    AndroidView(
+        modifier = Modifier.fillMaxWidth(),
+        factory = { context ->
+            TextView(context).apply {
+                includeFontPadding = false
+                linksClickable = true
+                movementMethod = LinkMovementMethod.getInstance()
+                setLineSpacing(0f, 1.12f)
+                setTextSize(14f)
+            }
+        },
+        update = { textView ->
+            textView.setTextColor(color.toArgb())
+            textView.setLinkTextColor(linkColor.toArgb())
+            textView.text = dictionaryDefinitionDisplayText(definition)
+        }
+    )
 }
 
 private fun splitJapaneseMorae(reading: String): List<String> {
@@ -721,6 +766,14 @@ private fun dictionaryDefinitionPlainText(processedDefinition: String): String {
     } else {
         processedDefinition
     }.replace('\u00A0', ' ')
+}
+
+private fun dictionaryDefinitionDisplayText(processedDefinition: String): CharSequence {
+    return if (processedDefinition.contains("<")) {
+        Html.fromHtml(processedDefinition, Html.FROM_HTML_MODE_LEGACY)
+    } else {
+        processedDefinition
+    }
 }
 
 private fun cleanDictionaryDefinitionLine(line: String): String {
