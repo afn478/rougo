@@ -3328,7 +3328,7 @@ fun SettingsScreen(
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "V2.3"
+        }.getOrNull() ?: "V2.7"
     }
     val usesDarkSurfaces = when (themeMode) {
         THEME_LIGHT -> false
