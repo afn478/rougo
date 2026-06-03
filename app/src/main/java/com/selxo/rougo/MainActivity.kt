@@ -306,22 +306,77 @@ private fun deleteDownloadedLocalCopy(context: Context, item: LibraryItem): Libr
     val source = item.sourceUrl?.trim()?.takeIf { it.isNotBlank() } ?: return null
     if (!item.hasDownloadedLocalCopy()) return null
 
-    if (!deleteLocalMediaUri(context, item.mediaUri.toUri())) return null
+    if (!deleteAppOwnedMediaUri(context, item.mediaUri.toUri())) return null
     return item.copy(mediaUri = source)
 }
 
-private fun deleteLocalMediaUri(context: Context, uri: Uri): Boolean {
+private fun deleteLibraryItemAssociatedFiles(context: Context, item: LibraryItem) {
+    item.coverArtPath?.let { deleteAppOwnedFilePath(context, it) }
+    cachedCoverPathForItem(context, item.id)?.let { deleteAppOwnedFilePath(context, it) }
+    item.subtitleUri?.let { deleteAppOwnedMediaUri(context, it.toUri()) }
+    item.recordings.forEach { recording ->
+        deleteAppOwnedFilePath(context, recording.filePath)
+    }
+
+    if (item.hasDownloadedLocalCopy()) {
+        deleteAppOwnedMediaUri(context, item.mediaUri.toUri())
+    }
+    deleteAppOwnedDownloadFilesForItem(context, item.id)
+}
+
+private fun deleteAppOwnedDownloadFilesForItem(context: Context, itemId: String) {
+    val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoDownloads")
+    val fileId = itemId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    destDir.listFiles()
+        ?.filter { it.isFile && it.name.startsWith(fileId) }
+        ?.forEach { deleteAppOwnedFile(context, it) }
+}
+
+private fun deleteAppOwnedMediaUri(context: Context, uri: Uri): Boolean {
     return try {
         when (uri.scheme?.lowercase(Locale.US)) {
             null, "file" -> {
-                val file = File(uri.path ?: return true)
-                !file.exists() || file.delete()
+                val path = uri.path ?: return true
+                deleteAppOwnedFile(context, File(path))
             }
-            "content" -> context.contentResolver.delete(uri, null, null) > 0
+            "content" -> if (uri.authority?.startsWith(context.packageName) == true) {
+                context.contentResolver.delete(uri, null, null) > 0
+            } else {
+                false
+            }
             else -> false
         }
     } catch (e: Exception) {
         false
+    }
+}
+
+private fun deleteAppOwnedFilePath(context: Context, path: String): Boolean {
+    return deleteAppOwnedFile(context, File(path))
+}
+
+private fun deleteAppOwnedFile(context: Context, file: File): Boolean {
+    return try {
+        val canonicalFile = file.canonicalFile
+        if (!isAppOwnedFile(context, canonicalFile)) return false
+        !canonicalFile.exists() || canonicalFile.delete()
+    } catch (e: Exception) {
+        false
+    }
+}
+
+private fun isAppOwnedFile(context: Context, file: File): Boolean {
+    val roots = buildList {
+        add(context.filesDir)
+        add(context.cacheDir)
+        context.externalCacheDir?.let { add(it) }
+        context.getExternalFilesDir(null)?.let { add(it) }
+    }
+
+    val filePath = runCatching { file.canonicalPath }.getOrNull() ?: return false
+    return roots.any { root ->
+        val rootPath = runCatching { root.canonicalPath }.getOrNull() ?: return@any false
+        filePath == rootPath || filePath.startsWith("$rootPath${File.separator}")
     }
 }
 
@@ -750,8 +805,8 @@ class LibraryManager(context: Context) {
 
     fun deleteItem(id: String) {
         val items = getItems()
-        items.firstOrNull { it.id == id }?.coverArtPath?.let { path ->
-            try { File(path).delete() } catch (e: Exception) {}
+        items.firstOrNull { it.id == id }?.let { item ->
+            deleteLibraryItemAssociatedFiles(appContext, item)
         }
         prefs.edit { putString("items", itemsToJson(items.filter { it.id != id }).toString()) }
     }
@@ -1280,13 +1335,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
-            val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("text/") == true) {
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
             val url = extractUrl(text)
             if (url != null) {
                 sharedUrlState.value = url
             }
+            clearConsumedShareIntent()
         }
+    }
+
+    private fun clearConsumedShareIntent() {
+        setIntent(Intent(this, MainActivity::class.java).apply {
+            action = Intent.ACTION_MAIN
+        })
     }
 
     private fun extractUrl(text: String): String? {
@@ -2792,6 +2854,37 @@ private fun mergeMetadataIntoItem(item: LibraryItem, metadata: MediaMetadataSnap
 // 3. UI SCREENS
 // ==========================================
 
+@Composable
+private fun LibraryControlsCollapseHandle(
+    expanded: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        )
+        Icon(
+            imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+            contentDescription = if (expanded) "Collapse library controls" else "Expand library controls",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp).size(18.dp)
+        )
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
@@ -2821,6 +2914,8 @@ fun LibraryScreen(
     var showHelpDialog by remember { mutableStateOf(false) }
     var linkText by remember { mutableStateOf("") }
     var isDownloadingLink by remember { mutableStateOf(false) }
+    var pendingDeleteItem by remember { mutableStateOf<LibraryItem?>(null) }
+    var libraryControlsExpanded by remember { mutableStateOf(true) }
     val downloadStates = remember { mutableStateMapOf<String, LibraryDownloadState>() }
 
     val filteredItems = remember(items, searchQuery, selectedFilter, sortMode) {
@@ -2918,6 +3013,14 @@ fun LibraryScreen(
         }
     }
 
+    fun requestDeleteItem(item: LibraryItem) {
+        if (item.isVideo && item.recordings.size > 5) {
+            pendingDeleteItem = item
+        } else {
+            onDelete(item)
+        }
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         floatingActionButton = {
@@ -2948,46 +3051,55 @@ fun LibraryScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear search")
+            if (libraryControlsExpanded) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear search")
+                            }
                         }
-                    }
-                },
-                placeholder = { Text("Search library") },
-                shape = RoundedCornerShape(12.dp)
+                    },
+                    placeholder = { Text("Search library") },
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                OutlinedButton(
+                    onClick = { showLinkDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Stream or download video link")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = onOpenYoutubeBrowser,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Browse YouTube")
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+
+            LibraryControlsCollapseHandle(
+                expanded = libraryControlsExpanded,
+                onClick = { libraryControlsExpanded = !libraryControlsExpanded }
             )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            OutlinedButton(
-                onClick = { showLinkDialog = true },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Stream or download video link")
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            OutlinedButton(
-                onClick = onOpenYoutubeBrowser,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Browse YouTube")
-            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -3058,7 +3170,7 @@ fun LibraryScreen(
                         LibraryCard(
                             item = item,
                             onClick = { onItemClick(item) },
-                            onDelete = { onDelete(item) },
+                            onDelete = { requestDeleteItem(item) },
                             downloadState = downloadState,
                             onDeleteDownload = if (hasLocalCopy) {
                                 {
@@ -3104,6 +3216,31 @@ fun LibraryScreen(
     }
 
     HelpDialog(showDialog = showHelpDialog, onDismiss = { showHelpDialog = false })
+
+    pendingDeleteItem?.let { item ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteItem = null },
+            title = { Text("Delete video?") },
+            text = {
+                Text(
+                    "This video has ${item.recordings.size} recordings. Deleting it will also delete its downloaded video, recordings, subtitles, and cached artwork."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDeleteItem = null
+                        onDelete(item)
+                    }
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { pendingDeleteItem = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     if (showAddDialog) {
         AlertDialog(
