@@ -302,6 +302,29 @@ private fun LibraryItem.hasDownloadedLocalCopy(): Boolean {
     return source.isNotBlank() && media.isNotBlank() && media != source && isLocalMediaUriValue(media)
 }
 
+private fun deleteDownloadedLocalCopy(context: Context, item: LibraryItem): LibraryItem? {
+    val source = item.sourceUrl?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    if (!item.hasDownloadedLocalCopy()) return null
+
+    if (!deleteLocalMediaUri(context, item.mediaUri.toUri())) return null
+    return item.copy(mediaUri = source)
+}
+
+private fun deleteLocalMediaUri(context: Context, uri: Uri): Boolean {
+    return try {
+        when (uri.scheme?.lowercase(Locale.US)) {
+            null, "file" -> {
+                val file = File(uri.path ?: return true)
+                !file.exists() || file.delete()
+            }
+            "content" -> context.contentResolver.delete(uri, null, null) > 0
+            else -> false
+        }
+    } catch (e: Exception) {
+        false
+    }
+}
+
 private fun LibraryItem.displaySourceLabel(): String {
     val source = sourceUrl
     return when {
@@ -1774,6 +1797,25 @@ private fun playableYoutubeUrl(url: String): String? {
     return if (hasVideoId) url else null
 }
 
+private fun youtubeThumbnailUrl(sourceUrl: String?): String? {
+    val videoId = youtubeVideoId(sourceUrl) ?: return null
+    return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+}
+
+private fun youtubeVideoId(sourceUrl: String?): String? {
+    val uri = runCatching { Uri.parse(sourceUrl ?: "") }.getOrNull() ?: return null
+    val host = uri.host.orEmpty().lowercase(Locale.US)
+    val segments = uri.pathSegments
+    val candidate = when {
+        host == "youtu.be" || host.endsWith(".youtu.be") -> segments.firstOrNull()
+        host.contains("youtube.com") -> uri.getQueryParameter("v")
+            ?: if (segments.size >= 2 && segments[0] in setOf("shorts", "live", "embed")) segments[1] else null
+        else -> null
+    }?.trim()
+
+    return candidate?.takeIf { Regex("[A-Za-z0-9_-]{6,}").matches(it) }
+}
+
 private fun isBilibiliUrl(url: String): Boolean {
     val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
     return host.contains("bilibili.com") || host == "b23.tv" || host.endsWith(".b23.tv")
@@ -2649,6 +2691,15 @@ private fun decodeSampledBitmapFile(path: String, maxSize: Int = 1024): Bitmap? 
     return BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = scale })
 }
 
+private fun cachedCoverPathForItem(context: Context, itemId: String?): String? {
+    val id = itemId?.takeIf { it.isNotBlank() } ?: return null
+    val coverDir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir, "MetadataCovers")
+    val safeId = id.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    return File(coverDir, "$safeId.jpg")
+        .takeIf { it.exists() && it.length() > 0L }
+        ?.absolutePath
+}
+
 private fun cacheCoverBytes(context: Context, itemId: String, bytes: ByteArray): String? {
     val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
@@ -3009,6 +3060,21 @@ fun LibraryScreen(
                             onClick = { onItemClick(item) },
                             onDelete = { onDelete(item) },
                             downloadState = downloadState,
+                            onDeleteDownload = if (hasLocalCopy) {
+                                {
+                                    val updatedItem = deleteDownloadedLocalCopy(context, item)
+                                    if (updatedItem != null) {
+                                        libraryManager.saveItem(updatedItem)
+                                        downloadStates.remove(item.id)
+                                        onRefresh()
+                                        Toast.makeText(context, "Deleted downloaded file.", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Download file could not be removed.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            } else {
+                                null
+                            },
                             onDownload = item.sourceUrl?.takeUnless { hasLocalCopy }?.let { sourceUrl ->
                                 {
                                     if (downloadState != LibraryDownloadState.Loading) {
@@ -3880,11 +3946,14 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     var selectedYoutubeSubtitleKey by remember(libraryItem.id) { mutableStateOf<String?>(null) }
     var autoSubtitleRetryAttempted by remember(libraryItem.id) { mutableStateOf(false) }
 
-    val albumArt = if (libraryItem.sourceUrl == null || libraryItem.hasDownloadedLocalCopy()) {
-        loadAlbumArt(context, libraryItem.mediaUri, libraryItem.isVideo, libraryItem.coverArtPath)
-    } else {
-        null
-    }
+    val albumArt = loadAlbumArt(
+        context = context,
+        uriString = libraryItem.mediaUri,
+        isVideo = libraryItem.isVideo,
+        cachedCoverPath = libraryItem.coverArtPath,
+        itemId = libraryItem.id,
+        sourceUrl = libraryItem.sourceUrl
+    )
 
     var isRecording by remember { mutableStateOf(false) }
     var shadowAudioRecorder by remember { mutableStateOf<ShadowAudioRecorder?>(null) }
@@ -5167,13 +5236,15 @@ fun LibraryCard(
     onClick: () -> Unit,
     onDelete: () -> Unit,
     onDownload: (() -> Unit)? = null,
+    onDeleteDownload: (() -> Unit)? = null,
     downloadState: LibraryDownloadState = LibraryDownloadState.Idle
 ) {
     val context = LocalContext.current
     val progressPct = if (item.duration > 0) (item.progress.toFloat() / item.duration.toFloat()) else 0f
-    val albumArt = loadAlbumArt(context, item.mediaUri, item.isVideo, item.coverArtPath)
+    val albumArt = loadAlbumArt(context, item.mediaUri, item.isVideo, item.coverArtPath, item.id, item.sourceUrl)
     val metadataLine = item.metadataSummary()
     val itemType = item.displaySourceLabel()
+    var showDownloadMenu by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
@@ -5256,22 +5327,46 @@ fun LibraryCard(
                 IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (onDownload != null || downloadState != LibraryDownloadState.Idle) {
-                    IconButton(
-                        onClick = { onDownload?.invoke() },
-                        enabled = onDownload != null && downloadState == LibraryDownloadState.Idle,
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        when (downloadState) {
-                            LibraryDownloadState.Loading -> {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                if (onDownload != null || onDeleteDownload != null || downloadState != LibraryDownloadState.Idle) {
+                    Box {
+                        IconButton(
+                            onClick = {
+                                if (downloadState == LibraryDownloadState.Complete && onDeleteDownload != null) {
+                                    showDownloadMenu = true
+                                } else {
+                                    onDownload?.invoke()
+                                }
+                            },
+                            enabled = downloadState != LibraryDownloadState.Loading &&
+                                (onDownload != null || (downloadState == LibraryDownloadState.Complete && onDeleteDownload != null)),
+                            modifier = Modifier.size(44.dp)
+                        ) {
+                            when (downloadState) {
+                                LibraryDownloadState.Loading -> {
+                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                }
+                                LibraryDownloadState.Complete -> {
+                                    Icon(Icons.Default.CheckCircle, contentDescription = "Downloaded", tint = MaterialTheme.colorScheme.primary)
+                                }
+                                LibraryDownloadState.Idle -> {
+                                    Icon(Icons.Default.Download, contentDescription = "Download", tint = MaterialTheme.colorScheme.primary)
+                                }
                             }
-                            LibraryDownloadState.Complete -> {
-                                Icon(Icons.Default.CheckCircle, contentDescription = "Downloaded", tint = MaterialTheme.colorScheme.primary)
-                            }
-                            LibraryDownloadState.Idle -> {
-                                Icon(Icons.Default.Download, contentDescription = "Download", tint = MaterialTheme.colorScheme.primary)
-                            }
+                        }
+                        DropdownMenu(
+                            expanded = showDownloadMenu,
+                            onDismissRequest = { showDownloadMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Delete download") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Delete, contentDescription = null)
+                                },
+                                onClick = {
+                                    showDownloadMenu = false
+                                    onDeleteDownload?.invoke()
+                                }
+                            )
                         }
                     }
                 }
@@ -6132,17 +6227,37 @@ fun exportRecording(context: Context, file: File) {
 }
 
 @Composable
-fun loadAlbumArt(context: Context, uriString: String, isVideo: Boolean, cachedCoverPath: String? = null): ImageBitmap? {
-    val cacheKey = cachedCoverPath?.takeIf { File(it).exists() && File(it).length() > 0L } ?: uriString
+fun loadAlbumArt(
+    context: Context,
+    uriString: String,
+    isVideo: Boolean,
+    cachedCoverPath: String? = null,
+    itemId: String? = null,
+    sourceUrl: String? = null
+): ImageBitmap? {
+    val savedCoverPath = cachedCoverPath?.takeIf { File(it).exists() && File(it).length() > 0L }
+    val remoteThumbnailUrl = if (isVideo) youtubeThumbnailUrl(sourceUrl) else null
+    val cachedRemoteCoverPath = if (savedCoverPath == null) cachedCoverPathForItem(context, itemId) else null
+    val cacheKey = savedCoverPath ?: cachedRemoteCoverPath ?: remoteThumbnailUrl ?: uriString
     var bitmap by remember(cacheKey) { mutableStateOf<ImageBitmap?>(ImageCache.cache[cacheKey]) }
 
-    LaunchedEffect(uriString, cachedCoverPath) {
+    LaunchedEffect(uriString, cachedCoverPath, itemId, sourceUrl) {
         if (bitmap != null) return@LaunchedEffect
 
         val loadedImage = withContext(Dispatchers.IO) {
-            cachedCoverPath
+            savedCoverPath
                 ?.let { decodeSampledBitmapFile(it)?.asImageBitmap() }
-                ?: loadAlbumArtFromMedia(context, uriString, isVideo)
+                ?: cachedRemoteCoverPath?.let { decodeSampledBitmapFile(it)?.asImageBitmap() }
+                ?: remoteThumbnailUrl?.let { thumbnailUrl ->
+                    val coverId = itemId?.takeIf { it.isNotBlank() } ?: "thumb_${thumbnailUrl.hashCode()}"
+                    downloadRemoteCover(context, coverId, thumbnailUrl)
+                        ?.let { decodeSampledBitmapFile(it)?.asImageBitmap() }
+                }
+                ?: if (sourceUrl != null && !isLocalMediaUriValue(uriString)) {
+                    null
+                } else {
+                    loadAlbumArtFromMedia(context, uriString, isVideo)
+                }
         }
 
         if (loadedImage != null) {
