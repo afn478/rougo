@@ -3051,26 +3051,26 @@ fun LibraryScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            if (libraryControlsExpanded) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Default.Close, contentDescription = "Clear search")
-                            }
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear search")
                         }
-                    },
-                    placeholder = { Text("Search library") },
-                    shape = RoundedCornerShape(12.dp)
-                )
+                    }
+                },
+                placeholder = { Text("Search library") },
+                shape = RoundedCornerShape(12.dp)
+            )
 
-                Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
+            if (libraryControlsExpanded) {
                 OutlinedButton(
                     onClick = { showLinkDialog = true },
                     modifier = Modifier.fillMaxWidth(),
