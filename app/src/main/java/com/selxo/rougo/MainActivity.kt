@@ -2010,18 +2010,20 @@ private fun addFastYoutubeOptions(context: Context, request: YoutubeDLRequest, s
         .addOption("--no-playlist")
         .addOption("--no-warnings")
         .addOption("--no-progress")
-        .addOption("--socket-timeout", "20")
-        .addOption("--retries", "2")
-        .addOption("--fragment-retries", "2")
+        .addOption("--force-ipv4")
         .addOption("--cache-dir", cacheDir.absolutePath)
 
     if (skipDownload) configured.addOption("--skip-download")
-    addWebViewCookiesOption(context, configured, sourceUrl)
-    if (isYoutubeUrl(sourceUrl)) configured.addOption("--extractor-args", "youtube:player_client=android,web")
+
+    if (isYoutubeUrl(sourceUrl)) {
+        // iOS/Android clients bypass the Web JS challenge.
+        // Skipping webpage, configs, and js stops yt-dlp from downloading heavy HTML/JS,
+        // saving several more seconds by directly hitting the lightweight mobile API!
+        configured.addOption("--extractor-args", "youtube:player_client=ios,android;player_skip=webpage,configs,js")
+    }
 
     return configured
 }
-
 private fun fastYoutubeFormatSelector(preferredResolution: String): String {
     return when (preferredResolution) {
         YOUTUBE_RESOLUTION_AUDIO -> "bestaudio[ext=m4a]/bestaudio/best"
@@ -2066,36 +2068,37 @@ private fun fetchFastYoutubeStream(context: Context, url: String, preferredResol
     check(ensureMediaToolsReady(context)) { "Media tools are unavailable." }
     val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url)
     request.addOption("-f", fastYoutubeFormatSelector(preferredResolution))
-    request.addOption("--print", "title:%(title)s")
-    request.addOption("--print", "format_id:%(format_id)s")
-    request.addOption("--print", "url:%(url)s")
-    request.addOption("--print", "vcodec:%(vcodec)s")
-    request.addOption("--print", "http_headers:%(http_headers)j")
+    request.addOption("--print", "%(title)s|||%(format_id)s|||%(url)s|||%(vcodec)s|||%(http_headers)j")
 
     return try {
         val response = YoutubeDL.getInstance().execute(request, null, false)
-        val values = parseYtdlpPrintOutput(response.out)
-        val streamUrl = cleanYtdlpPrintedValue(values["url"]) ?: return null
-        val title = cleanYtdlpPrintedValue(values["title"]) ?: "YouTube Stream"
-        val formatId = cleanYtdlpPrintedValue(values["format_id"])
-        val vcodec = cleanYtdlpPrintedValue(values["vcodec"])
-        val headers = values["http_headers"]?.let {
-            runCatching { parseStreamHttpHeaders(JSONObject(it)) }.getOrNull()
+        val outLine = response.out.lineSequence().lastOrNull { it.contains("|||") } ?: return null
+        val parts = outLine.split("|||")
+        if (parts.size >= 5) {
+            val title = parts[0].takeIf { it.isNotBlank() && it != "NA" && it != "null" } ?: "YouTube Stream"
+            val formatId = parts[1].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
+            val streamUrl = parts[2].takeIf { it.isNotBlank() && it != "NA" && it != "null" } ?: return null
+            val vcodec = parts[3].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
+            val headersJson = parts[4].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
+            val headers = headersJson?.let {
+                runCatching { parseStreamHttpHeaders(JSONObject(it)) }.getOrNull()
+            }
+            FastYoutubeStream(
+                title = title,
+                streamUrl = streamUrl,
+                formatId = formatId,
+                isVideo = vcodec != "none",
+                httpUserAgent = headers?.first,
+                httpReferer = headers?.second
+            )
+        } else {
+            null
         }
-        FastYoutubeStream(
-            title = title,
-            streamUrl = streamUrl,
-            formatId = formatId,
-            isVideo = vcodec != "none",
-            httpUserAgent = headers?.first,
-            httpReferer = headers?.second
-        )
     } catch (t: Throwable) {
         CrashReporter.recordHandled(context, "Fast YouTube stream", t)
         null
     }
 }
-
 private fun createFastYoutubeLibraryItem(stream: FastYoutubeStream, sourceUrl: String): LibraryItem {
     return LibraryItem(
         id = UUID.randomUUID().toString(),
@@ -2524,9 +2527,21 @@ private fun selectPreferredYoutubeFormat(
 }
 
 private fun resolveYoutubeStreamUrl(context: Context, url: String, formatId: String?): String? {
-    val json = fetchYoutubeInfoJson(context, url)
-    val targetFormat = parseYoutubeFormats(json).firstOrNull { it.formatId == formatId }
-    return targetFormat?.bestPlaybackUrl() ?: json.optString("url").takeIf { it.isNotBlank() }
+    if (!ensureMediaToolsReady(context)) return null
+    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url)
+    if (formatId != null) {
+        request.addOption("-f", formatId)
+    } else {
+        request.addOption("-f", "best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best")
+    }
+    request.addOption("--print", "url")
+    return try {
+        val response = YoutubeDL.getInstance().execute(request, null, false)
+        response.out.lineSequence().firstOrNull { it.trim().startsWith("http") }?.trim()
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
 }
 
 private fun fetchYoutubeInfoJson(context: Context, url: String): JSONObject {
@@ -2715,7 +2730,9 @@ private fun initialPlayableMediaUri(item: LibraryItem): String? {
     val mediaUri = item.mediaUri.trim()
     if (mediaUri.isBlank()) return null
     if (item.sourceUrl == null) return mediaUri
-    return mediaUri.takeIf { item.hasDownloadedLocalCopy() }
+    if (item.hasDownloadedLocalCopy()) return mediaUri
+    if (mediaUri != item.sourceUrl.trim()) return mediaUri
+    return null
 }
 
 private fun YoutubeStreamFormat.bestPlaybackUrl(): String? {
