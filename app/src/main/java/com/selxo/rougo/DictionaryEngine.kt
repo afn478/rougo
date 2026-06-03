@@ -24,6 +24,8 @@ data class DictEntry(
     val reading: String,
     val definition: String,
     val dictName: String,
+    val definitionTags: String = "",
+    val termTags: String = "",
     val pitchPositions: List<PitchInfo> = emptyList()
 )
 
@@ -68,6 +70,20 @@ class DictionaryEngine private constructor(private val context: Context) {
 
     fun isNoiseCancellationEnabled(): Boolean = prefs.getBoolean("noise_cancel", false)
     fun setNoiseCancellationEnabled(enabled: Boolean) = prefs.edit { putBoolean("noise_cancel", enabled) }
+
+    fun isDictionaryBlockCollapseEnabled(dictName: String): Boolean {
+        return prefs.getBoolean(
+            dictionaryBlockCollapseKey(dictName),
+            prefs.getBoolean(dictionaryNestedCollapseKey(dictName), true)
+        )
+    }
+
+    fun setDictionaryBlockCollapseEnabled(dictName: String, enabled: Boolean) {
+        prefs.edit {
+            putBoolean(dictionaryBlockCollapseKey(dictName), enabled)
+            remove(dictionaryNestedCollapseKey(dictName))
+        }
+    }
 
     fun getTargetLanguage(): String {
         val saved = prefs.getString("target_language", DeinflectorRegistry.DEFAULT_LANGUAGE)
@@ -201,6 +217,10 @@ class DictionaryEngine private constructor(private val context: Context) {
 
     fun deleteDict(name: String) {
         File(dictsDir, name).deleteRecursively()
+        prefs.edit {
+            remove(dictionaryBlockCollapseKey(name))
+            remove(dictionaryNestedCollapseKey(name))
+        }
         loadDictionaries()
     }
 
@@ -351,10 +371,15 @@ class DictionaryEngine private constructor(private val context: Context) {
                 reading = term.reading,
                 definition = glossary.glossary,
                 dictName = glossary.dictName,
+                definitionTags = glossary.definitionTags,
+                termTags = glossary.termTags,
                 pitchPositions = allPitches
             )
         }
     }
+
+    private fun dictionaryBlockCollapseKey(dictName: String): String = "dict_block_collapse_$dictName"
+    private fun dictionaryNestedCollapseKey(dictName: String): String = "dict_nested_collapse_$dictName"
 
     private fun sortedDictionaryFolders(): List<File> {
         val allFolders = dictsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
