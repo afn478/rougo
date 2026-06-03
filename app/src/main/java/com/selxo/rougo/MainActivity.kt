@@ -24,7 +24,6 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
-import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Size
 import android.util.Log
@@ -94,11 +93,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.selxo.rougo.dictionary.DeinflectorRegistry
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -809,12 +806,6 @@ private data class FastYoutubeStream(
 private data class YoutubeResolutionOption(val key: String, val label: String)
 private data class AccentOption(val key: String, val label: String, val darkColor: Color, val lightColor: Color)
 enum class LibraryDownloadState { Idle, Loading, Complete }
-
-private enum class PairedPlaybackExitMode {
-    PauseBoth,
-    ContinueOriginal,
-    ContinueVoice
-}
 
 private const val PREF_YOUTUBE_RESOLUTION = "youtube_preferred_resolution"
 private const val PREF_YOUTUBE_AUTO_SUBTITLES = "youtube_auto_subtitles"
@@ -3875,9 +3866,6 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
     val recordings = remember { mutableStateListOf<ShadowRecording>().apply { addAll(libraryItem.recordings) } }
     var activeOriginalSegment by remember { mutableStateOf<ShadowRecording?>(null) }
-    var activeBothSegment by remember { mutableStateOf<ShadowRecording?>(null) }
-    var continuingOriginalSegment by remember { mutableStateOf<ShadowRecording?>(null) }
-    var pairedPlaybackExitMode by remember { mutableStateOf(PairedPlaybackExitMode.PauseBoth) }
     var repeatPracticeSegment by remember { mutableStateOf<ShadowRecording?>(null) }
     var repeatAttemptCount by remember { mutableIntStateOf(0) }
 
@@ -4094,39 +4082,6 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         }
     }
 
-    suspend fun prepareVoiceSegment(segment: ShadowRecording, startAtMs: Long = 0L): Boolean {
-        val prepared = CompletableDeferred<Boolean>()
-        return try {
-            voiceAudioPlayer.apply {
-                reset()
-                setDataSource(segment.filePath)
-                setOnPreparedListener {
-                    activeVoiceSegmentId = segment.id
-                    val seekToMs = startAtMs.coerceAtLeast(0L).coerceAtMost((segment.endTime - segment.startTime).coerceAtLeast(0L))
-                    if (seekToMs > 0L) seekTo(seekToMs.toInt())
-                    voiceCurrentPos = seekToMs
-                    if (!prepared.isCompleted) prepared.complete(true)
-                }
-                setOnCompletionListener {
-                    activeVoiceSegmentId = null
-                    voiceCurrentPos = -1L
-                }
-                setOnErrorListener { _, _, _ ->
-                    activeVoiceSegmentId = null
-                    voiceCurrentPos = -1L
-                    if (!prepared.isCompleted) prepared.complete(false)
-                    true
-                }
-                prepareAsync()
-            }
-            withTimeoutOrNull(2500) { prepared.await() } == true
-        } catch (e: Exception) {
-            activeVoiceSegmentId = null
-            voiceCurrentPos = -1L
-            false
-        }
-    }
-
     fun toggleVoiceSegment(segment: ShadowRecording) {
         if (activeVoiceSegmentId == segment.id) {
             if (voiceAudioPlayer.isPlaying) {
@@ -4150,32 +4105,6 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         } else {
             playVoiceSegment(segment, positionMs)
         }
-    }
-
-    fun toggleBothSegment(segment: ShadowRecording) {
-        if (activeBothSegment?.id == segment.id) {
-            pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-            activeBothSegment = null
-        } else {
-            activeOriginalSegment = null
-            continuingOriginalSegment = null
-            pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-            activeBothSegment = segment
-        }
-    }
-
-    fun pauseOriginalFromBoth(segment: ShadowRecording) {
-        if (activeBothSegment?.id != segment.id) return
-        pairedPlaybackExitMode = PairedPlaybackExitMode.ContinueVoice
-        continuingOriginalSegment = null
-        activeBothSegment = null
-    }
-
-    fun pauseVoiceFromBoth(segment: ShadowRecording) {
-        if (activeBothSegment?.id != segment.id) return
-        pairedPlaybackExitMode = PairedPlaybackExitMode.ContinueOriginal
-        continuingOriginalSegment = segment
-        activeBothSegment = null
     }
 
     DisposableEffect(Unit) {
@@ -4208,110 +4137,6 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             } finally {
                 vlcPlayer.pause()
                 if (activeOriginalSegment?.id == segment.id) activeOriginalSegment = null
-            }
-        }
-    }
-
-    LaunchedEffect(activeBothSegment) {
-        activeBothSegment?.let { segment ->
-            try {
-                try { voiceAudioPlayer.pause() } catch (e: Exception) {}
-                seekMainPlayer(segment.startTime, resumeAfterSeek = false)
-
-                var seekWaitCount = 0
-                while (Math.abs(vlcPlayer.time - segment.startTime) > 600 && seekWaitCount < 24) {
-                    delay(25)
-                    seekWaitCount++
-                }
-
-                if (!prepareVoiceSegment(segment)) {
-                    Toast.makeText(context, "Error playing recorded audio", Toast.LENGTH_SHORT).show()
-                    return@let
-                }
-
-                val segmentDuration = (segment.endTime - segment.startTime).coerceAtLeast(1L)
-                vlcPlayer.time = segment.startTime
-                currentPos = segment.startTime
-                voiceCurrentPos = 0L
-
-                val playRequestedAtMs = SystemClock.elapsedRealtime()
-                vlcPlayer.play()
-                isPlaying = true
-
-                while (
-                    !vlcPlayer.isPlaying &&
-                    SystemClock.elapsedRealtime() - playRequestedAtMs < 180L &&
-                    activeBothSegment?.id == segment.id
-                ) {
-                    delay(10)
-                }
-
-                val originalOffsetAtStart = (vlcPlayer.time - segment.startTime).coerceIn(0L, segmentDuration)
-                if (originalOffsetAtStart > 20L) {
-                    try { voiceAudioPlayer.seekTo(originalOffsetAtStart.toInt()) } catch (e: Exception) {}
-                    voiceCurrentPos = originalOffsetAtStart
-                }
-
-                if (activeBothSegment?.id == segment.id) {
-                    voiceAudioPlayer.start()
-                }
-
-                while (activeBothSegment?.id == segment.id && vlcPlayer.time < segment.endTime) {
-                    val originalOffset = (vlcPlayer.time - segment.startTime).coerceIn(0L, segmentDuration)
-                    if (voiceAudioPlayer.isPlaying) {
-                        val voiceOffset = voiceAudioPlayer.currentPosition.toLong().coerceAtLeast(0L)
-                        val drift = originalOffset - voiceOffset
-                        if (kotlin.math.abs(drift) > 120L && originalOffset < segmentDuration - 50L) {
-                            try { voiceAudioPlayer.seekTo(originalOffset.toInt()) } catch (e: Exception) {}
-                            voiceCurrentPos = originalOffset
-                        }
-                    }
-                    delay(25)
-                }
-            } finally {
-                when (pairedPlaybackExitMode) {
-                    PairedPlaybackExitMode.PauseBoth -> {
-                        try { vlcPlayer.pause() } catch (e: Exception) {}
-                        if (activeVoiceSegmentId == segment.id && voiceAudioPlayer.isPlaying) {
-                            try { voiceAudioPlayer.pause() } catch (e: Exception) {}
-                        }
-                        if (activeVoiceSegmentId == segment.id) {
-                            activeVoiceSegmentId = null
-                            voiceCurrentPos = -1L
-                        }
-                    }
-                    PairedPlaybackExitMode.ContinueOriginal -> {
-                        if (activeVoiceSegmentId == segment.id && voiceAudioPlayer.isPlaying) {
-                            try { voiceAudioPlayer.pause() } catch (e: Exception) {}
-                        }
-                        if (activeVoiceSegmentId == segment.id) {
-                            activeVoiceSegmentId = null
-                            voiceCurrentPos = -1L
-                        }
-                        continuingOriginalSegment = segment
-                    }
-                    PairedPlaybackExitMode.ContinueVoice -> {
-                        try { vlcPlayer.pause() } catch (e: Exception) {}
-                    }
-                }
-                if (activeBothSegment?.id == segment.id) activeBothSegment = null
-                pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-            }
-        }
-    }
-
-    LaunchedEffect(continuingOriginalSegment) {
-        continuingOriginalSegment?.let { segment ->
-            try {
-                if (!vlcPlayer.isPlaying) vlcPlayer.play()
-                while (continuingOriginalSegment?.id == segment.id && vlcPlayer.time < segment.endTime) {
-                    delay(50)
-                }
-            } finally {
-                if (continuingOriginalSegment?.id == segment.id) {
-                    try { vlcPlayer.pause() } catch (e: Exception) {}
-                    continuingOriginalSegment = null
-                }
             }
         }
     }
@@ -4569,9 +4394,6 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
         repeatAttemptCount = 0
         activeOriginalSegment = null
-        continuingOriginalSegment = null
-        pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-        activeBothSegment = null
 
         try {
             while (repeatPracticeSegment?.id == segment.id) {
@@ -4635,12 +4457,10 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             val activeTimeline = isPlaying ||
                 voiceAudioPlayer.isPlaying ||
                 activeOriginalSegment != null ||
-                activeBothSegment != null ||
-                continuingOriginalSegment != null ||
                 repeatPracticeSegment != null
             if (activeTimeline) {
                 val frameMs = withFrameMillis { it }
-                if (isPlaying || activeOriginalSegment != null || activeBothSegment != null || continuingOriginalSegment != null || repeatPracticeSegment != null) {
+                if (isPlaying || activeOriginalSegment != null || repeatPracticeSegment != null) {
                     val polledPos = vlcPlayer.time.coerceAtLeast(0L)
                     val frameDelta = if (lastFrameMs > 0L) (frameMs - lastFrameMs).coerceIn(0L, 100L) else 0L
                     currentPos = if (polledPos == lastPolledMainPos && frameDelta > 0L && duration > 0L) {
@@ -4651,11 +4471,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     lastPolledMainPos = polledPos
                 }
 
-                val pairedSegment = activeBothSegment
-                if (pairedSegment != null) {
-                    val pairedDuration = (pairedSegment.endTime - pairedSegment.startTime).coerceAtLeast(1L)
-                    voiceCurrentPos = (currentPos - pairedSegment.startTime).coerceIn(0L, pairedDuration)
-                } else if (activeVoiceSegmentId != null) {
+                if (activeVoiceSegmentId != null) {
                     voiceCurrentPos = voiceAudioPlayer.currentPosition.toLong()
                 } else {
                     voiceCurrentPos = -1L
@@ -5029,26 +4845,11 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             context = context,
                             originalMediaUri = actualMediaUri ?: libraryItem.mediaUri,
                             onPlayOriginal = {
-                                if (activeBothSegment?.id == latest.id) {
-                                    pauseOriginalFromBoth(latest)
-                                } else {
-                                    pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-                                    activeBothSegment = null
-                                    continuingOriginalSegment = null
-                                    activeOriginalSegment = if (activeOriginalSegment?.id == latest.id) null else latest
-                                }
+                                activeOriginalSegment = if (activeOriginalSegment?.id == latest.id) null else latest
                             },
                             onPlayVoice = {
-                                if (activeBothSegment?.id == latest.id) {
-                                    pauseVoiceFromBoth(latest)
-                                } else {
-                                    pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-                                    activeBothSegment = null
-                                    continuingOriginalSegment = null
-                                    toggleVoiceSegment(latest)
-                                }
+                                toggleVoiceSegment(latest)
                             },
-                            onPlayBoth = { toggleBothSegment(latest) },
                             onSeekOriginal = { targetMs -> seekMainPlayer(targetMs, resumeAfterSeek = false) },
                             onSeekVoice = { targetMs -> seekVoiceSegment(latest, targetMs) },
                             onRepeatPractice = {
@@ -5067,10 +4868,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onShare = { exportRecording(context, File(latest.filePath)) },
                             isRepeatPracticeActive = repeatPracticeSegment?.id == latest.id,
                             currentOriginalTime = currentPos,
-                            currentRecordedTime = if (activeVoiceSegmentId == latest.id || activeBothSegment?.id == latest.id) voiceCurrentPos else -1L,
-                            isOriginalPlaying = activeOriginalSegment?.id == latest.id || activeBothSegment?.id == latest.id || continuingOriginalSegment?.id == latest.id,
-                            isRecordedPlaying = (activeVoiceSegmentId == latest.id && voiceAudioPlayer.isPlaying) || activeBothSegment?.id == latest.id,
-                            isBothPlaying = activeBothSegment?.id == latest.id
+                            currentRecordedTime = if (activeVoiceSegmentId == latest.id) voiceCurrentPos else -1L,
+                            isOriginalPlaying = activeOriginalSegment?.id == latest.id,
+                            isRecordedPlaying = activeVoiceSegmentId == latest.id && voiceAudioPlayer.isPlaying
                         )
                     }
                 }
@@ -5103,26 +4903,11 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             context = context,
                             originalMediaUri = actualMediaUri ?: libraryItem.mediaUri,
                             onPlayOriginal = {
-                                if (activeBothSegment?.id == rec.id) {
-                                    pauseOriginalFromBoth(rec)
-                                } else {
-                                    pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-                                    activeBothSegment = null
-                                    continuingOriginalSegment = null
-                                    activeOriginalSegment = if (activeOriginalSegment?.id == rec.id) null else rec
-                                }
+                                activeOriginalSegment = if (activeOriginalSegment?.id == rec.id) null else rec
                             },
                             onPlayVoice = {
-                                if (activeBothSegment?.id == rec.id) {
-                                    pauseVoiceFromBoth(rec)
-                                } else {
-                                    pairedPlaybackExitMode = PairedPlaybackExitMode.PauseBoth
-                                    activeBothSegment = null
-                                    continuingOriginalSegment = null
-                                    toggleVoiceSegment(rec)
-                                }
+                                toggleVoiceSegment(rec)
                             },
-                            onPlayBoth = { toggleBothSegment(rec) },
                             onSeekOriginal = { targetMs -> seekMainPlayer(targetMs, resumeAfterSeek = false) },
                             onSeekVoice = { targetMs -> seekVoiceSegment(rec, targetMs) },
                             onRepeatPractice = {
@@ -5141,10 +4926,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onShare = { exportRecording(context, File(rec.filePath)) },
                             isRepeatPracticeActive = repeatPracticeSegment?.id == rec.id,
                             currentOriginalTime = currentPos,
-                            currentRecordedTime = if (activeVoiceSegmentId == rec.id || activeBothSegment?.id == rec.id) voiceCurrentPos else -1L,
-                            isOriginalPlaying = activeOriginalSegment?.id == rec.id || activeBothSegment?.id == rec.id || continuingOriginalSegment?.id == rec.id,
-                            isRecordedPlaying = (activeVoiceSegmentId == rec.id && voiceAudioPlayer.isPlaying) || activeBothSegment?.id == rec.id,
-                            isBothPlaying = activeBothSegment?.id == rec.id
+                            currentRecordedTime = if (activeVoiceSegmentId == rec.id) voiceCurrentPos else -1L,
+                            isOriginalPlaying = activeOriginalSegment?.id == rec.id,
+                            isRecordedPlaying = activeVoiceSegmentId == rec.id && voiceAudioPlayer.isPlaying
                         )
                     }
                 }
@@ -5455,7 +5239,6 @@ fun RecordingItemCard(
     originalMediaUri: String,
     onPlayOriginal: () -> Unit,
     onPlayVoice: () -> Unit,
-    onPlayBoth: () -> Unit,
     onSeekOriginal: (Long) -> Unit = {},
     onSeekVoice: (Long) -> Unit = {},
     onRepeatPractice: () -> Unit,
@@ -5465,8 +5248,7 @@ fun RecordingItemCard(
     currentOriginalTime: Long = -1L,
     currentRecordedTime: Long = -1L,
     isOriginalPlaying: Boolean = false,
-    isRecordedPlaying: Boolean = false,
-    isBothPlaying: Boolean = false
+    isRecordedPlaying: Boolean = false
 ) {
     var originalAmplitudes by remember { mutableStateOf<List<Float>>(emptyList()) }
     var originalPitches by remember { mutableStateOf<List<Float?>>(emptyList()) }
@@ -5550,18 +5332,6 @@ fun RecordingItemCard(
             )
 
             Spacer(modifier = Modifier.height(12.dp))
-
-            Button(
-                onClick = onPlayBoth,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary)
-            ) {
-                Icon(if (isBothPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(if (isBothPlaying) "Pause Both" else "Play Both", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
 
             OutlinedButton(
                 onClick = onRepeatPractice,
