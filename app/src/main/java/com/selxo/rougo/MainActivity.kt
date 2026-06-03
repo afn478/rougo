@@ -5030,14 +5030,18 @@ fun WaveformTrack(
     isLoading: Boolean = false
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(48.dp)) {
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .background(color, CircleShape)
-                .clickable { onClick() },
-            contentAlignment = Alignment.Center
+        Surface(
+            onClick = onClick,
+            modifier = Modifier.size(32.dp),
+            shape = CircleShape,
+            color = color
         ) {
-            Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            Box(
+                modifier = Modifier.fillMaxWidth().height(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
         }
         Spacer(Modifier.width(8.dp))
         Box(
