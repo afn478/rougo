@@ -482,56 +482,60 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
         containerColor = colorScheme.surface
     ) {
         Column(modifier = Modifier.fillMaxWidth().height(maxSheetHeight).padding(16.dp).padding(bottom = 32.dp)) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                label = { Text("Search Dictionary") },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = colorScheme.onSurface,
-                    unfocusedTextColor = colorScheme.onSurface,
-                    focusedContainerColor = colorScheme.surface,
-                    unfocusedContainerColor = colorScheme.surface,
-                    focusedLabelColor = colorScheme.primary,
-                    unfocusedLabelColor = colorScheme.onSurfaceVariant,
-                    focusedBorderColor = colorScheme.primary,
-                    unfocusedBorderColor = colorScheme.onSurfaceVariant,
-                    cursorColor = colorScheme.primary
-                ),
-                trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    label = { Text("Search Dictionary") },
+                    modifier = Modifier.weight(1f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = colorScheme.onSurface,
+                        unfocusedTextColor = colorScheme.onSurface,
+                        focusedContainerColor = colorScheme.surface,
+                        unfocusedContainerColor = colorScheme.surface,
+                        focusedLabelColor = colorScheme.primary,
+                        unfocusedLabelColor = colorScheme.onSurfaceVariant,
+                        focusedBorderColor = colorScheme.primary,
+                        unfocusedBorderColor = colorScheme.onSurfaceVariant,
+                        cursorColor = colorScheme.primary
+                    ),
+                    trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
                             IconButton(onClick = { searchQuery = "" }) {
                                 Icon(Icons.Default.Clear, contentDescription = "Clear", tint = colorScheme.onSurfaceVariant)
                             }
                         }
-                        Box {
-                            TextButton(onClick = { showTargetLanguageMenu = true }) {
-                                Text(
-                                    targetLanguageCode,
-                                    color = colorScheme.primary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showTargetLanguageMenu,
-                                onDismissRequest = { showTargetLanguageMenu = false }
-                            ) {
-                                DeinflectorRegistry.languageOptions.forEach { option ->
-                                    DropdownMenuItem(
-                                        text = { Text(option.label) },
-                                        onClick = {
-                                            targetLanguage = option.code
-                                            engine.setTargetLanguage(option.code)
-                                            showTargetLanguageMenu = false
-                                        }
-                                    )
+                    }
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Box {
+                    TextButton(
+                        onClick = { showTargetLanguageMenu = true },
+                        modifier = Modifier.height(56.dp).width(56.dp)
+                    ) {
+                        Text(
+                            targetLanguageCode,
+                            color = colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showTargetLanguageMenu,
+                        onDismissRequest = { showTargetLanguageMenu = false }
+                    ) {
+                        DeinflectorRegistry.languageOptions.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.label) },
+                                onClick = {
+                                    targetLanguage = option.code
+                                    engine.setTargetLanguage(option.code)
+                                    showTargetLanguageMenu = false
                                 }
-                            }
+                            )
                         }
                     }
                 }
-            )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
