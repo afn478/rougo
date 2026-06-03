@@ -1335,44 +1335,111 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        val url = when (intent?.action) {
-            Intent.ACTION_SEND -> extractUrl(
-                listOfNotNull(
-                    intent.getStringExtra(Intent.EXTRA_TEXT),
-                    intent.getStringExtra(Intent.EXTRA_SUBJECT)
-                ).joinToString(" ")
-            )
-            Intent.ACTION_VIEW -> {
-                val dataString = intent.dataString.orEmpty()
-                extractUrl(dataString) ?: dataString.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-            }
-            else -> null
-        }
-
+        val url = extractSharedVideoUrl(intent)
+    
         if (url != null) {
             sharedUrlState.value = url
         }
-
+    
         if (intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_VIEW) {
             clearConsumedShareIntent()
         }
     }
-
+    
     private fun clearConsumedShareIntent() {
         setIntent(Intent(this, MainActivity::class.java).apply {
             action = Intent.ACTION_MAIN
         })
     }
-
-    private fun extractUrl(text: String): String? {
-        val regex = Regex("(?i)\\b((?:https?://|www\\d{0,3}[.]|[a-z0-9.\\-]+[.][a-z]{2,4}/)(?:[^\\s()<>]+|\\((?:[^\\s()<>]+|\\([^\\s()<>]+\\))*\\))+(?:\\((?:[^\\s()<>]+|\\([^\\s()<>]+\\))*\\)|[^\\s`!()\\[\\]{};:'\".,<>?«»“”‘’]))")
-        return regex.find(text)?.value
+    
+    private fun extractSharedVideoUrl(intent: Intent?): String? {
+        if (intent == null) return null
+    
+        val candidates = mutableListOf<String>()
+    
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                candidates += listOfNotNull(
+                    intent.getStringExtra(Intent.EXTRA_TEXT),
+                    intent.getStringExtra(Intent.EXTRA_SUBJECT),
+                    intent.getStringExtra(Intent.EXTRA_TITLE)
+                )
+    
+                intent.clipData?.let { clipData ->
+                    for (i in 0 until clipData.itemCount) {
+                        clipData.getItemAt(i)
+                            ?.coerceToText(this)
+                            ?.toString()
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { candidates += it }
+                    }
+                }
+            }
+    
+            Intent.ACTION_VIEW -> {
+                candidates += listOfNotNull(
+                    intent.dataString,
+                    intent.data?.toString()
+                )
+            }
+    
+            else -> return null
+        }
+    
+        val urls = candidates
+            .flatMap { extractAllUrls(it) }
+            .map { normalizeVideoUrlCandidate(it) }
+            .filter { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+            .distinct()
+    
+        return urls.firstOrNull { isSupportedVideoLink(it) }
+            ?: urls.firstOrNull()
     }
 }
 
 private fun extractFirstUrl(text: String): String? {
-    val regex = Regex("(?i)\\b((?:https?://|www\\d{0,3}[.]|[a-z0-9.\\-]+[.][a-z]{2,6}/)(?:[^\\s()<>]+|\\((?:[^\\s()<>]+|\\([^\\s()<>]+\\))*\\))+(?:\\((?:[^\\s()<>]+|\\([^\\s()<>]+\\))*\\)|[^\\s`!()\\[\\]{};:'\".,<>?«»“”‘’]))")
-    return regex.find(text)?.value?.trim()
+    return extractAllUrls(text)
+        .map { normalizeVideoUrlCandidate(it) }
+        .firstOrNull()
+}
+
+private fun extractAllUrls(text: String): List<String> {
+    val regex = Regex(
+        "(?i)\\b((?:https?://|www\\d{0,3}[.]|[a-z0-9.\\-]+[.][a-z]{2,10}/)" +
+            "(?:[^\\s()<>]+|\\((?:[^\\s()<>]+|\\([^\\s()<>]+\\))*\\))+" +
+            "(?:\\((?:[^\\s()<>]+|\\([^\\s()<>]+\\))*\\)|[^\\s`!()\\[\\]{};:'\".,<>?«»“”‘’]))"
+    )
+
+    return regex.findAll(text)
+        .map { it.value.trim() }
+        .toList()
+}
+
+private fun normalizeVideoUrlCandidate(raw: String): String {
+    val trimmed = raw
+        .trim()
+        .trimEnd(
+            '.', ',', ';', ':',
+            '。', '、', '，', '；', '：',
+            ')', ']', '}', '）', '】', '』', '」', '》',
+            '"', '\''
+        )
+
+    return when {
+        trimmed.startsWith("www.", ignoreCase = true) ->
+            "https://$trimmed"
+
+        !trimmed.startsWith("http://", ignoreCase = true) &&
+            !trimmed.startsWith("https://", ignoreCase = true) &&
+            trimmed.contains(".") ->
+            "https://$trimmed"
+
+        else -> trimmed
+    }
+}
+
+private fun isSupportedVideoLink(url: String): Boolean {
+    return isYoutubeUrl(url) || isBilibiliUrl(url) || isNiconicoUrl(url)
 }
 
 fun isNewerVersion(remoteTag: String, currentVersion: String?): Boolean {
