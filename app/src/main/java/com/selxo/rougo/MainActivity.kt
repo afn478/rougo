@@ -3293,14 +3293,23 @@ fun LibraryScreen(
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(filteredItems, key = { it.id }) { item ->
                         val hasLocalCopy = item.hasDownloadedLocalCopy()
-                        val downloadState = downloadStates[item.id]
-                            ?: if (hasLocalCopy) LibraryDownloadState.Complete else LibraryDownloadState.Idle
+                        val youtubeSourceUrl = item.sourceUrl?.takeIf { isYoutubeUrl(it) }
+                        val canManageYoutubeDownload = youtubeSourceUrl != null
+
+                        val downloadState = if (canManageYoutubeDownload) {
+                            downloadStates[item.id]
+                                ?: if (hasLocalCopy) LibraryDownloadState.Complete else LibraryDownloadState.Idle
+                        } else {
+                            LibraryDownloadState.Idle
+                        }
+
                         LibraryCard(
                             item = item,
                             onClick = { onItemClick(item) },
                             onDelete = { requestDeleteItem(item) },
                             downloadState = downloadState,
-                            onDeleteDownload = if (hasLocalCopy) {
+
+                            onDeleteDownload = if (canManageYoutubeDownload && hasLocalCopy) {
                                 {
                                     val updatedItem = deleteDownloadedLocalCopy(context, item)
                                     if (updatedItem != null) {
@@ -3315,8 +3324,11 @@ fun LibraryScreen(
                             } else {
                                 null
                             },
-                            onDownload = item.sourceUrl?.takeUnless { hasLocalCopy }?.let { sourceUrl ->
+
+                            onDownload = if (canManageYoutubeDownload && !hasLocalCopy) {
                                 {
+                                    val sourceUrl = youtubeSourceUrl ?: return@LibraryCard
+
                                     if (downloadState != LibraryDownloadState.Loading) {
                                         downloadStates[item.id] = LibraryDownloadState.Loading
                                         importScope.launch {
@@ -3335,6 +3347,8 @@ fun LibraryScreen(
                                         }
                                     }
                                 }
+                            } else {
+                                null
                             }
                         )
                     }
