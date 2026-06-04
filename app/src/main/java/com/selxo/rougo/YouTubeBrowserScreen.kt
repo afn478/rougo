@@ -23,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -75,7 +76,7 @@ fun YouTubeBrowserScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("YouTube", fontWeight = FontWeight.Bold) },
+                title = { Text(stringResource(R.string.youtube_browser_title), fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = {
                         val view = webView
@@ -86,12 +87,12 @@ fun YouTubeBrowserScreen(
                             onBack()
                         }
                     }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 },
                 actions = {
                     IconButton(onClick = { webView?.loadUrl("https://m.youtube.com/") }) {
-                        Icon(Icons.Default.Home, contentDescription = "Home")
+                        Icon(Icons.Default.Home, contentDescription = stringResource(R.string.common_home))
                     }
                     IconButton(onClick = {
                         val view = webView ?: return@IconButton
@@ -99,7 +100,7 @@ fun YouTubeBrowserScreen(
                     }) {
                         Icon(
                             if (isLoading) Icons.Default.Close else Icons.Default.Refresh,
-                            contentDescription = if (isLoading) "Stop" else "Refresh"
+                            contentDescription = stringResource(if (isLoading) R.string.common_stop else R.string.common_refresh)
                         )
                     }
                 },

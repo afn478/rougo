@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -569,7 +570,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             }
         } catch (e: Exception) {
             activeVoiceSegmentId = null
-            Toast.makeText(context, "Error playing audio", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.player_error_playing_audio), Toast.LENGTH_SHORT).show()
             onPlaybackEnded?.invoke(false)
         }
     }
@@ -707,14 +708,15 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
     LaunchedEffect(currentPos, parsedAudioCues, isSubtitlesVisible, subtitleDelayMs, isParsingSubtitles) {
         if (isSubtitlesVisible) {
             if (isParsingSubtitles) {
-                currentSubtitleText = "Loading subtitles..."
+                currentSubtitleText = context.getString(R.string.player_loading_subtitles)
             } else if (parsedAudioCues.isNotEmpty()) {
                 val effectivePos = currentPos - subtitleDelayMs
                 val nextSubtitleText = findSubtitleCue(parsedAudioCues, effectivePos)?.text ?: ""
                 if (currentSubtitleText != nextSubtitleText) currentSubtitleText = nextSubtitleText
             } else if (libraryItem.subtitleUri != null) {
-                if (currentSubtitleText != "No valid text found in subtitle file.") {
-                    currentSubtitleText = "No valid text found in subtitle file."
+                val noValidSubtitleText = context.getString(R.string.player_no_valid_subtitles)
+                if (currentSubtitleText != noValidSubtitleText) {
+                    currentSubtitleText = noValidSubtitleText
                 }
             }
         } else {
@@ -801,13 +803,13 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                     LibraryManager(context).saveItem(libraryItem)
                                     actualMediaUri = refreshedUri
                                 } else {
-                                    Toast.makeText(context, "Playback failed. Stream might be geo-blocked or broken.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, context.getString(R.string.player_playback_failed_stream), Toast.LENGTH_SHORT).show()
                                 }
                                 isRefreshingStream = false
                             }
                         } else {
                             uiScope.launch {
-                                Toast.makeText(context, "Playback failed. Stream might be geo-blocked or broken.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, context.getString(R.string.player_playback_failed_stream), Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -825,7 +827,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         } catch (e: Exception) {
             e.printStackTrace()
             CoroutineScope(Dispatchers.Main).launch {
-                Toast.makeText(context, "Playback Initialization Error: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, context.getString(R.string.player_initialization_error, e.localizedMessage.orEmpty()), Toast.LENGTH_LONG).show()
             }
         }
 
@@ -873,7 +875,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             success = recorder.stop()
         } catch (e: Exception) {
             success = false
-            if (showShortToast) Toast.makeText(context, "Recording was too short!", Toast.LENGTH_SHORT).show()
+            if (showShortToast) Toast.makeText(context, context.getString(R.string.player_recording_too_short_toast), Toast.LENGTH_SHORT).show()
         } finally {
             shadowAudioRecorder = null
             isRecording = false
@@ -889,14 +891,14 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             }
             return recording
         } else {
-            if (success && showShortToast) Toast.makeText(context, "Recording segment was too short.", Toast.LENGTH_SHORT).show()
+            if (success && showShortToast) Toast.makeText(context, context.getString(R.string.player_recording_segment_too_short_toast), Toast.LENGTH_SHORT).show()
             try { File(currentFilePath).delete() } catch (e: Exception) {}
         }
         return null
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-        if (!isGranted) Toast.makeText(context, "Mic required!", Toast.LENGTH_SHORT).show()
+        if (!isGranted) Toast.makeText(context, context.getString(R.string.player_mic_required_toast), Toast.LENGTH_SHORT).show()
     }
 
     LaunchedEffect(repeatPracticeSegment) {
@@ -907,7 +909,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             return@LaunchedEffect
         }
         if (segment.endTime <= segment.startTime + MIN_SHADOW_SEGMENT_MS) {
-            Toast.makeText(context, "Segment is too short to repeat.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.player_segment_too_short_repeat_toast), Toast.LENGTH_SHORT).show()
             repeatPracticeSegment = null
             return@LaunchedEffect
         }
@@ -937,7 +939,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
                 vlcPlayer.time = segment.startTime
                 if (!startRecordingToFile(file)) {
-                    Toast.makeText(context, "Could not start recording.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, context.getString(R.string.player_recording_start_failed_toast), Toast.LENGTH_SHORT).show()
                     repeatPracticeSegment = null
                     break
                 }
@@ -1051,7 +1053,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 val updatedItem = libraryItem.copy(progress = currentPos, duration = duration, recordings = recordings.toList(), mediaUri = libraryItem.persistableMediaUri(actualMediaUri))
                 onBack(updatedItem)
             }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onBackground)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back), tint = MaterialTheme.colorScheme.onBackground)
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(libraryItem.title, color = MaterialTheme.colorScheme.onBackground, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1076,7 +1078,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 Box {
                     Icon(
                         imageVector = Icons.Default.Subtitles,
-                        contentDescription = "Toggle Subs",
+                        contentDescription = stringResource(R.string.player_toggle_subtitles),
                         tint = if (isSubtitlesVisible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
                             .size(40.dp)
@@ -1093,7 +1095,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         onDismissRequest = { showSubMenu = false }
                     ) {
                         DropdownMenuItem(
-                            text = { Text(if (isSubtitlesVisible) "Hide Captions" else "Show Captions") },
+                            text = { Text(stringResource(if (isSubtitlesVisible) R.string.player_hide_captions else R.string.player_show_captions)) },
                             onClick = {
                                 isSubtitlesVisible = !isSubtitlesVisible
                                 showSubMenu = false
@@ -1101,7 +1103,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         )
 
                         DropdownMenuItem(
-                            text = { Text("Add Custom Subtitles") },
+                            text = { Text(stringResource(R.string.player_add_custom_subtitles)) },
                             onClick = {
                                 showSubMenu = false
                                 subtitleLauncher.launch(arrayOf("*/*"))
@@ -1131,13 +1133,13 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         if (youtubeSourceUrl != null) {
                             if (isLoadingYoutubeSubtitleChoices) {
                                 DropdownMenuItem(
-                                    text = { Text("Loading YouTube Captions...") },
+                                    text = { Text(stringResource(R.string.player_loading_youtube_captions)) },
                                     enabled = false,
                                     onClick = {}
                                 )
                             } else if (youtubeSubtitleChoices.isEmpty() && youtubeSubtitleChoicesLoaded) {
                                 DropdownMenuItem(
-                                    text = { Text("No YouTube Captions Found") },
+                                    text = { Text(stringResource(R.string.player_no_youtube_captions)) },
                                     enabled = false,
                                     onClick = {}
                                 )
@@ -1168,7 +1170,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                                     embeddedSubtitlesEnabled = true
                                                     LibraryManager(context).saveItem(libraryItem)
                                                 } else {
-                                                    Toast.makeText(context, "Subtitle download failed.", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, context.getString(R.string.player_subtitle_download_failed_toast), Toast.LENGTH_SHORT).show()
                                                     isParsingSubtitles = false
                                                 }
                                             }
@@ -1183,7 +1185,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         val visibleTracks = spuTracks.filter { it.id != -1 }
                         if (visibleTracks.isEmpty()) {
                             DropdownMenuItem(
-                                text = { Text("No Embedded Captions") },
+                                text = { Text(stringResource(R.string.player_no_embedded_captions)) },
                                 enabled = false,
                                 onClick = {}
                             )
@@ -1205,7 +1207,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         }
 
                         DropdownMenuItem(
-                            text = { Text(if (embeddedSubtitlesEnabled) "Disable Embedded Subs" else "Enable Embedded Subs") },
+                            text = { Text(stringResource(if (embeddedSubtitlesEnabled) R.string.player_disable_embedded_subs else R.string.player_enable_embedded_subs)) },
                             onClick = {
                                 setEmbeddedSubtitlesEnabled(!embeddedSubtitlesEnabled, spuTracks)
                                 showSubMenu = false
@@ -1222,7 +1224,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Resolving live stream URL...", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                        Text(stringResource(R.string.player_resolving_live_stream), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                     }
                 } else if (libraryItem.isVideo) {
                     AndroidView(
@@ -1237,7 +1239,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 } else {
                     if (albumArt != null) {
                         Image(
-                            bitmap = albumArt, contentDescription = "Album Art", contentScale = if (isSubtitlesVisible) ContentScale.Crop else ContentScale.Fit,
+                            bitmap = albumArt, contentDescription = stringResource(R.string.player_album_art), contentScale = if (isSubtitlesVisible) ContentScale.Crop else ContentScale.Fit,
                             modifier = Modifier.fillMaxSize().then(if (isSubtitlesVisible) Modifier.blur(radius = 24.dp) else Modifier)
                         )
                     } else {
@@ -1303,20 +1305,20 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Subtitle Delay", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                            Text(stringResource(R.string.player_subtitle_delay), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 TextButton(onClick = {
                                     subtitleDelayMs = (subtitleDelayMs - 250L).coerceIn(-5000L, 5000L)
                                     prefs.edit { putLong(PREF_SUBTITLE_OFFSET_MS, subtitleDelayMs) }
                                 }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                    Text("-0.25s", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                                    Text(stringResource(R.string.player_minus_quarter_second), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                                 }
-                                Text(String.format(Locale.US, "%.2fs", subtitleDelayMs / 1000f), color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp))
+                                Text(stringResource(R.string.settings_seconds_value, subtitleDelayMs / 1000f), color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp))
                                 TextButton(onClick = {
                                     subtitleDelayMs = (subtitleDelayMs + 250L).coerceIn(-5000L, 5000L)
                                     prefs.edit { putLong(PREF_SUBTITLE_OFFSET_MS, subtitleDelayMs) }
                                 }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                    Text("+0.25s", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                                    Text(stringResource(R.string.player_plus_quarter_second), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                                 }
                             }
                         }
@@ -1324,9 +1326,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
                     repeatPracticeSegment?.let { segment ->
                         val repeatStatus = when (repeatPracticePhase) {
-                            RepeatPracticePhase.RecordingAttempt -> "Recording with source"
-                            RepeatPracticePhase.PlayingAttempt -> "Playing attempt"
-                            RepeatPracticePhase.Idle -> "Starting"
+                            RepeatPracticePhase.RecordingAttempt -> stringResource(R.string.player_repeat_recording_with_source)
+                            RepeatPracticePhase.PlayingAttempt -> stringResource(R.string.player_repeat_playing_attempt)
+                            RepeatPracticePhase.Idle -> stringResource(R.string.player_repeat_starting)
                         }
                         Surface(
                             modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
@@ -1340,7 +1342,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                     Icon(Icons.Default.Repeat, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(8.dp))
                                     Text(
-                                        "Repeating ${formatTime(segment.startTime)} - ${formatTime(segment.endTime)}  Attempts: $repeatAttemptCount",
+                                        stringResource(R.string.player_repeating_segment_status, formatTime(segment.startTime), formatTime(segment.endTime), repeatAttemptCount),
                                         color = MaterialTheme.colorScheme.onSurface,
                                         fontSize = 12.sp,
                                         modifier = Modifier.weight(1f),
@@ -1351,7 +1353,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                         repeatPracticeSegment = null
                                         repeatPracticePhase = RepeatPracticePhase.Idle
                                     }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                        Text("Stop", color = Color(0xFFFF8A80), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                        Text(stringResource(R.string.common_stop), color = Color(0xFFFF8A80), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                                 Spacer(Modifier.height(4.dp))
@@ -1365,7 +1367,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                 Spacer(Modifier.height(4.dp))
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        "Save repeat recordings",
+                                        stringResource(R.string.player_save_repeat_recordings),
                                         color = MaterialTheme.colorScheme.onSurface,
                                         fontSize = 12.sp,
                                         modifier = Modifier.weight(1f).padding(end = 8.dp),
@@ -1402,7 +1404,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                     if (startRecordingToFile(file)) {
                                         playMainPlayer()
                                     } else {
-                                        Toast.makeText(context, "Could not start recording.", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, context.getString(R.string.player_recording_start_failed_toast), Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
@@ -1418,9 +1420,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         Spacer(Modifier.width(8.dp))
                         Text(
                             when {
-                                repeatPracticeSegment != null -> "STOP REPEAT MODE"
-                                isRecording -> "STOP SHADOWING"
-                                else -> "START SHADOWING"
+                                repeatPracticeSegment != null -> stringResource(R.string.player_stop_repeat_mode)
+                                isRecording -> stringResource(R.string.player_stop_shadowing)
+                                else -> stringResource(R.string.player_start_shadowing)
                             },
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp
@@ -1432,10 +1434,10 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     item {
                         Spacer(modifier = Modifier.height(12.dp))
                         Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Latest Recording", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                            Text(stringResource(R.string.player_latest_recording), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             if (recordings.size > 1) {
                                 TextButton(onClick = { showBacklog = true }, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(24.dp)) {
-                                    Text("View Backlog (${recordings.size - 1})", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                                    Text(stringResource(R.string.player_view_backlog, recordings.size - 1), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                                 }
                             }
                         }
@@ -1494,7 +1496,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             containerColor = MaterialTheme.colorScheme.surface
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(16.dp).padding(bottom = 32.dp)) {
-                Text("Session Backlog", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(stringResource(R.string.player_session_backlog), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 Spacer(modifier = Modifier.height(16.dp))
 
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {

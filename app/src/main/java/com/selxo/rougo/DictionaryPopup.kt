@@ -75,6 +75,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -486,7 +487,7 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    label = { Text("Search Dictionary") },
+                    label = { Text(stringResource(R.string.dictionary_search_label)) },
                     modifier = Modifier.weight(1f),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = colorScheme.onSurface,
@@ -502,7 +503,7 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
                             IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Default.Clear, contentDescription = "Clear", tint = colorScheme.onSurfaceVariant)
+                                Icon(Icons.Default.Clear, contentDescription = stringResource(R.string.dictionary_clear_search), tint = colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -525,7 +526,7 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
                     ) {
                         DeinflectorRegistry.languageOptions.forEach { option ->
                             DropdownMenuItem(
-                                text = { Text(option.label) },
+                                text = { Text(stringResource(option.labelRes)) },
                                 onClick = {
                                     targetLanguage = option.code
                                     engine.setTargetLanguage(option.code)
@@ -542,7 +543,7 @@ fun HoshiDictionaryBottomSheet(query: String, engine: DictionaryEngine, onDismis
             when {
                 isSearching -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
                 results.isEmpty() -> Text(
-                    "No results found.",
+                    stringResource(R.string.dictionary_no_results),
                     color = colorScheme.onSurfaceVariant,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 )
@@ -701,7 +702,7 @@ private fun DictionaryEntrySection(
             if (blockCanCollapse) {
                 Icon(
                     if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Collapse dictionary source" else "Expand dictionary source",
+                    contentDescription = stringResource(if (expanded) R.string.dictionary_collapse_source else R.string.dictionary_expand_source),
                     tint = colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp)
                 )
@@ -964,7 +965,7 @@ private fun DictionaryDetailsBlock(
         ) {
             Icon(
                 if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                contentDescription = if (expanded) "Collapse $summaryText" else "Expand $summaryText",
+                contentDescription = stringResource(if (expanded) R.string.dictionary_collapse_named else R.string.dictionary_expand_named, summaryText),
                 tint = colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(18.dp)
             )

@@ -155,15 +155,15 @@ internal fun isNiconicoUrl(url: String): Boolean {
     val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
     return host.contains("nicovideo.jp") || host.contains("nico.ms")
 }
-internal fun streamSourceLabel(url: String?): String {
-    if (url.isNullOrBlank()) return "Video"
+internal fun streamSourceLabel(context: Context, url: String?): String {
+    if (url.isNullOrBlank()) return context.getString(R.string.media_source_video)
     return when {
-        isYoutubeUrl(url) -> "YouTube"
-        isBilibiliUrl(url) -> "Bilibili"
-        isNiconicoUrl(url) -> "Niconico"
+        isYoutubeUrl(url) -> context.getString(R.string.media_source_youtube)
+        isBilibiliUrl(url) -> context.getString(R.string.media_source_bilibili)
+        isNiconicoUrl(url) -> context.getString(R.string.media_source_niconico)
         else -> runCatching { Uri.parse(url).host.orEmpty().removePrefix("www.") }
             .getOrDefault("")
-            .ifBlank { "Stream" }
+            .ifBlank { context.getString(R.string.media_source_stream) }
     }
 }
 private fun addFastYoutubeOptions(context: Context, request: YoutubeDLRequest, sourceUrl: String, skipDownload: Boolean = true): YoutubeDLRequest {
@@ -208,27 +208,28 @@ private fun cleanYtdlpPrintedValue(value: String?): String? {
         ?.trim()
         ?.takeIf { it.isNotBlank() && it != "NA" && it != "null" }
 }
-private fun sourceDefaultTitle(url: String): String = "${streamSourceLabel(url)} Video"
-private fun cleanYtdlpTitle(value: String?, sourceUrl: String): String? {
+private fun sourceDefaultTitle(context: Context, url: String): String =
+    context.getString(R.string.media_source_default_title, streamSourceLabel(context, url))
+private fun cleanYtdlpTitle(context: Context, value: String?, sourceUrl: String): String? {
     val cleaned = cleanYtdlpPrintedValue(value)
         ?.replace(Regex("\\s+"), " ")
         ?.takeIf { !looksLikeGeneratedFileId(it) }
-    return cleaned ?: sourceDefaultTitle(sourceUrl)
+    return cleaned ?: sourceDefaultTitle(context, sourceUrl)
 }
-private fun cleanOptionalYtdlpTitle(value: String?, sourceUrl: String): String? {
-    return cleanYtdlpTitle(value, sourceUrl)
-        ?.takeIf { it != sourceDefaultTitle(sourceUrl) }
+private fun cleanOptionalYtdlpTitle(context: Context, value: String?, sourceUrl: String): String? {
+    return cleanYtdlpTitle(context, value, sourceUrl)
+        ?.takeIf { it != sourceDefaultTitle(context, sourceUrl) }
 }
 internal fun looksLikeGeneratedFileId(value: String): Boolean {
     return Regex("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:[._ -].*)?$")
         .matches(value.trim())
 }
-private fun titleFromDownloadedFile(file: File, fileId: String, sourceUrl: String): String? {
+private fun titleFromDownloadedFile(context: Context, file: File, fileId: String, sourceUrl: String): String? {
     val raw = file.nameWithoutExtension
         .removePrefix(fileId)
         .trimStart('.', '-', '_', ' ')
         .replace(Regex("\\s+"), " ")
-    return cleanOptionalYtdlpTitle(raw, sourceUrl)
+    return cleanOptionalYtdlpTitle(context, raw, sourceUrl)
 }
 internal fun fetchFastYoutubeStream(context: Context, url: String, preferredResolution: String): FastYoutubeStream? {
     if (!isYoutubeUrl(url)) return null
@@ -242,7 +243,8 @@ internal fun fetchFastYoutubeStream(context: Context, url: String, preferredReso
         val outLine = response.out.lineSequence().lastOrNull { it.contains("|||") } ?: return null
         val parts = outLine.split("|||")
         if (parts.size >= 5) {
-            val title = parts[0].takeIf { it.isNotBlank() && it != "NA" && it != "null" } ?: "YouTube Stream"
+            val title = parts[0].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
+                ?: context.getString(R.string.media_source_youtube_stream)
             val formatId = parts[1].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
             val streamUrl = parts[2].takeIf { it.isNotBlank() && it != "NA" && it != "null" } ?: return null
             val vcodec = parts[3].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
@@ -371,13 +373,14 @@ internal fun fetchYoutubeSetupData(context: Context, url: String): YoutubeSetupD
     val headers = parseStreamHttpHeaders(json)
     val isYoutubeSource = isYoutubeUrl(url)
     val title = cleanYtdlpTitle(
+        context,
         firstCleanMetadataValue(
             json.optString("fulltitle"),
             json.optString("title"),
             json.optString("alt_title")
         ),
         url
-    ) ?: sourceDefaultTitle(url)
+    ) ?: sourceDefaultTitle(context, url)
 
     return YoutubeSetupData(
         title = title,
@@ -410,7 +413,7 @@ internal suspend fun createYoutubeLibraryItem(
     val coverArtPath = setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
     LibraryItem(
         id = itemId,
-        title = setupData?.title ?: "YouTube Stream",
+        title = setupData?.title ?: context.getString(R.string.media_source_youtube_stream),
         mediaUri = sourceUrl,
         subtitleUri = subtitleUri,
         progress = 0L,
@@ -455,8 +458,10 @@ internal fun downloadRemoteCover(context: Context, itemId: String, url: String):
         null
     }
 }
-internal fun youtubeResolutionLabel(key: String): String {
-    return YOUTUBE_RESOLUTION_OPTIONS.firstOrNull { it.key == key }?.label ?: "Ask every time"
+internal fun youtubeResolutionLabel(context: Context, key: String): String {
+    val labelRes = YOUTUBE_RESOLUTION_OPTIONS.firstOrNull { it.key == key }?.labelRes
+        ?: R.string.option_youtube_quality_ask
+    return context.getString(labelRes)
 }
 private fun hasPostNotificationsPermission(context: Context): Boolean {
     return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -471,10 +476,10 @@ private fun createPlayerNotificationChannel(context: Context) {
 
     val channel = NotificationChannel(
         PLAYER_NOTIFICATION_CHANNEL_ID,
-        "Player controls",
+        context.getString(R.string.notification_channel_player_name),
         NotificationManager.IMPORTANCE_LOW
     ).apply {
-        description = "Playback controls for 朗語"
+        description = context.getString(R.string.notification_channel_player_description)
         setShowBadge(false)
     }
     manager.createNotificationChannel(channel)
@@ -487,10 +492,10 @@ private fun createDownloadNotificationChannel(context: Context) {
 
     val channel = NotificationChannel(
         DOWNLOAD_NOTIFICATION_CHANNEL_ID,
-        "Downloads",
+        context.getString(R.string.notification_channel_downloads_name),
         NotificationManager.IMPORTANCE_LOW
     ).apply {
-        description = "Media download progress for 朗語"
+        description = context.getString(R.string.notification_channel_downloads_description)
         setShowBadge(false)
     }
     manager.createNotificationChannel(channel)
@@ -541,22 +546,22 @@ internal fun showPlayerNotification(
     val actions = listOf(
         nativeNotificationAction(
             android.R.drawable.ic_media_rew,
-            "-${skipSeconds}s",
+            context.getString(R.string.notification_action_rewind, skipSeconds),
             playerNotificationPendingIntent(context, ACTION_PLAYER_REWIND)
         ),
         nativeNotificationAction(
             if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-            if (isPlaying) "Pause" else "Play",
+            context.getString(if (isPlaying) R.string.common_pause else R.string.common_play),
             playerNotificationPendingIntent(context, ACTION_PLAYER_PLAY_PAUSE)
         ),
         nativeNotificationAction(
             android.R.drawable.ic_media_ff,
-            "+${skipSeconds}s",
+            context.getString(R.string.notification_action_forward, skipSeconds),
             playerNotificationPendingIntent(context, ACTION_PLAYER_FORWARD)
         ),
         nativeNotificationAction(
             android.R.drawable.ic_menu_close_clear_cancel,
-            "Stop",
+            context.getString(R.string.common_stop),
             playerNotificationPendingIntent(context, ACTION_PLAYER_STOP)
         )
     )
@@ -678,7 +683,7 @@ private fun showDownloadProgressNotification(
     key: String,
     title: String,
     progressPercent: Int?,
-    detail: String = "Downloading..."
+    detail: String = context.getString(R.string.download_progress_downloading)
 ) {
     forgetCompletedDownloadNotification(context, downloadNotificationId(key))
     showDownloadNotification(context, key) {
@@ -704,7 +709,7 @@ private fun showDownloadCompleteNotification(context: Context, key: String, titl
 
     val posted = showDownloadNotification(context, key) {
         setSmallIcon(android.R.drawable.stat_sys_download_done)
-        setContentTitle("Download complete")
+        setContentTitle(context.getString(R.string.download_complete_title))
         setContentText(title)
         setOngoing(false)
         setAutoCancel(true)
@@ -718,7 +723,7 @@ private fun showDownloadFailedNotification(context: Context, key: String, title:
     forgetCompletedDownloadNotification(context, downloadNotificationId(key))
     showDownloadNotification(context, key) {
         setSmallIcon(android.R.drawable.stat_notify_error)
-        setContentTitle(if (cancelled) "Download cancelled" else "Download failed")
+        setContentTitle(context.getString(if (cancelled) R.string.download_cancelled_title else R.string.download_failed_title))
         setContentText(title)
         setOngoing(false)
         setAutoCancel(true)
@@ -731,17 +736,21 @@ private fun downloadProgressPercent(progress: Float): Int? {
     if (progress.isNaN() || progress.isInfinite() || progress < 0f || progress > 100f) return null
     return progress.roundToInt().coerceIn(0, 100)
 }
-private fun downloadProgressDetail(progressPercent: Int?, etaSeconds: Long, line: String): String {
+private fun downloadProgressDetail(context: Context, progressPercent: Int?, etaSeconds: Long, line: String): String {
     if (progressPercent == null) {
-        return line.takeIf { it.isNotBlank() }?.take(80) ?: "Downloading..."
+        return line.takeIf { it.isNotBlank() }?.take(80) ?: context.getString(R.string.download_progress_downloading)
     }
     val etaText = when {
         etaSeconds <= 0L -> null
-        etaSeconds < 60L -> "${etaSeconds}s left"
-        etaSeconds < 3600L -> "${etaSeconds / 60L}m left"
-        else -> "${etaSeconds / 3600L}h ${(etaSeconds % 3600L) / 60L}m left"
+        etaSeconds < 60L -> context.getString(R.string.download_eta_seconds, etaSeconds)
+        etaSeconds < 3600L -> context.getString(R.string.download_eta_minutes, etaSeconds / 60L)
+        else -> context.getString(R.string.download_eta_hours_minutes, etaSeconds / 3600L, (etaSeconds % 3600L) / 60L)
     }
-    return listOfNotNull("$progressPercent%", etaText).joinToString(" - ")
+    return if (etaText != null) {
+        context.getString(R.string.download_progress_detail, progressPercent, etaText)
+    } else {
+        context.getString(R.string.download_progress_percent_only, progressPercent)
+    }
 }
 internal fun selectPreferredYoutubeSubtitle(choices: List<YoutubeSubtitleChoice>, preferredLanguage: String): YoutubeSubtitleChoice? {
     if (choices.isEmpty()) return null
@@ -876,9 +885,9 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
     val fileId = itemId.replace(Regex("[^A-Za-z0-9_-]"), "_")
     val notificationKey = "media_download_$fileId"
     val initialTitle = existingItem?.title?.takeIf { !looksLikeGeneratedFileId(it) }
-        ?: sourceDefaultTitle(url)
+        ?: sourceDefaultTitle(context, url)
 
-    showDownloadProgressNotification(context, notificationKey, initialTitle, null, "Preparing download...")
+    showDownloadProgressNotification(context, notificationKey, initialTitle, null, context.getString(R.string.download_progress_preparing))
 
     if (!ensureMediaToolsReady(context)) {
         showDownloadFailedNotification(context, notificationKey, initialTitle)
@@ -886,7 +895,7 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
     }
 
     val setupData = runCatching { fetchYoutubeSetupData(context, url) }.getOrNull()
-    val notificationTitle = cleanOptionalYtdlpTitle(setupData?.title, url)
+    val notificationTitle = cleanOptionalYtdlpTitle(context, setupData?.title, url)
         ?: initialTitle
     val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoDownloads").apply { mkdirs() }
 
@@ -898,7 +907,7 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
     return try {
         var lastProgressNotificationAt = 0L
         var lastProgressPercent = -1
-        showDownloadProgressNotification(context, notificationKey, notificationTitle, null, "Starting download...")
+        showDownloadProgressNotification(context, notificationKey, notificationTitle, null, context.getString(R.string.download_progress_starting))
 
         YoutubeDL.getInstance().execute(request, fileId, false) { progress, etaSeconds, line ->
             val progressPercent = downloadProgressPercent(progress)
@@ -912,12 +921,12 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
                     key = notificationKey,
                     title = notificationTitle,
                     progressPercent = progressPercent,
-                    detail = downloadProgressDetail(progressPercent, etaSeconds, line)
+                    detail = downloadProgressDetail(context, progressPercent, etaSeconds, line)
                 )
             }
         }
 
-        showDownloadProgressNotification(context, notificationKey, notificationTitle, 100, "Finalizing download...")
+        showDownloadProgressNotification(context, notificationKey, notificationTitle, 100, context.getString(R.string.download_progress_finalizing))
         val downloadedFile = destDir.listFiles()
             ?.filter { it.isFile && it.name.startsWith(fileId) && it.length() > 0L && !it.name.endsWith(".part") }
             ?.maxByOrNull { it.lastModified() }
@@ -928,10 +937,10 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
 
         val mediaUri = Uri.fromFile(downloadedFile)
         val metadata = extractMediaMetadata(context, mediaUri, itemId, isVideo = true)
-        val fallbackTitle = cleanOptionalYtdlpTitle(setupData?.title, url)
+        val fallbackTitle = cleanOptionalYtdlpTitle(context, setupData?.title, url)
             ?: existingItem?.title?.takeIf { !looksLikeGeneratedFileId(it) }
-            ?: titleFromDownloadedFile(downloadedFile, fileId, url)
-            ?: sourceDefaultTitle(url)
+            ?: titleFromDownloadedFile(context, downloadedFile, fileId, url)
+            ?: sourceDefaultTitle(context, url)
         val baseItem = LibraryItem(
             id = itemId,
             title = fallbackTitle,

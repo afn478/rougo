@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -86,14 +87,15 @@ fun SettingsScreen(
     var showYoutubeQualityMenu by remember { mutableStateOf(false) }
     var showYoutubeSubtitleLanguageMenu by remember { mutableStateOf(false) }
     var showThemeMenu by remember { mutableStateOf(false) }
+    val appUpToDateToast = stringResource(R.string.settings_up_to_date_toast)
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { Text(stringResource(R.string.settings_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -115,12 +117,12 @@ fun SettingsScreen(
                         Icon(Icons.Default.Palette, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Theme", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                            Text("Choose dark, black, light, or system", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_theme_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            Text(stringResource(R.string.settings_theme_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         }
                         Box {
                             TextButton(onClick = { showThemeMenu = true }) {
-                                Text(THEME_MODE_OPTIONS.firstOrNull { it.key == themeMode }?.label ?: "Dark")
+                                Text(stringResource(THEME_MODE_OPTIONS.firstOrNull { it.key == themeMode }?.labelRes ?: R.string.option_theme_dark))
                             }
                             DropdownMenu(
                                 expanded = showThemeMenu,
@@ -128,7 +130,7 @@ fun SettingsScreen(
                             ) {
                                 THEME_MODE_OPTIONS.forEach { option ->
                                     DropdownMenuItem(
-                                        text = { Text(option.label) },
+                                        text = { Text(stringResource(option.labelRes)) },
                                         onClick = {
                                             onThemeModeChanged(option.key)
                                             showThemeMenu = false
@@ -141,12 +143,13 @@ fun SettingsScreen(
 
                     Spacer(Modifier.height(16.dp))
 
-                    Text("Accent", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                    Text(stringResource(R.string.settings_accent_title), fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
                     Spacer(Modifier.height(8.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(ACCENT_OPTIONS) { option ->
                             val selected = accentColor == option.key
                             val swatch = if (usesDarkSurfaces) option.darkColor else option.lightColor
+                            val optionLabel = stringResource(option.labelRes)
                             Box(
                                 modifier = Modifier
                                     .size(34.dp)
@@ -156,7 +159,7 @@ fun SettingsScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (selected) {
-                                    Icon(Icons.Default.Check, contentDescription = option.label, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Default.Check, contentDescription = optionLabel, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(18.dp))
                                 }
                             }
                         }
@@ -174,8 +177,8 @@ fun SettingsScreen(
                     Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(16.dp))
                     Column {
-                        Text("Dictionaries", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Manage and import Yomitan dictionaries", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(stringResource(R.string.settings_dictionaries_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text(stringResource(R.string.settings_dictionaries_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                     Spacer(Modifier.weight(1f))
                     Icon(Icons.Default.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -192,12 +195,12 @@ fun SettingsScreen(
                     Icon(Icons.Default.Translate, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Target Language", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Used for dictionary lookups", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(stringResource(R.string.settings_target_language_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text(stringResource(R.string.settings_target_language_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                     Box {
                         TextButton(onClick = { showDictionaryLanguageMenu = true }) {
-                            Text(DeinflectorRegistry.languageOptions.firstOrNull { it.code == dictionaryTargetLanguage }?.label ?: "Japanese")
+                            Text(stringResource(DeinflectorRegistry.languageOptions.firstOrNull { it.code == dictionaryTargetLanguage }?.labelRes ?: R.string.dictionary_language_japanese))
                         }
                         DropdownMenu(
                             expanded = showDictionaryLanguageMenu,
@@ -205,7 +208,7 @@ fun SettingsScreen(
                         ) {
                             DeinflectorRegistry.languageOptions.forEach { option ->
                                 DropdownMenuItem(
-                                    text = { Text(option.label) },
+                                    text = { Text(stringResource(option.labelRes)) },
                                     onClick = {
                                         dictionaryTargetLanguage = option.code
                                         engine.setTargetLanguage(option.code)
@@ -228,8 +231,8 @@ fun SettingsScreen(
                     Icon(Icons.Default.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Noise Cancellation", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Reduce background noise during shadowing", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(stringResource(R.string.settings_noise_cancellation_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text(stringResource(R.string.settings_noise_cancellation_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                     Switch(
                         checked = noiseCancelEnabled,
@@ -252,15 +255,15 @@ fun SettingsScreen(
                         Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Player Controls", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                            Text("Customize seek buttons and subtitle timing", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_player_controls_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            Text(stringResource(R.string.settings_player_controls_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         }
                     }
 
                     Spacer(Modifier.height(16.dp))
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Skip Buttons", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.width(120.dp))
+                        Text(stringResource(R.string.settings_skip_buttons_title), color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.width(120.dp))
                         Slider(
                             value = skipSeconds.toFloat(),
                             onValueChange = {
@@ -272,12 +275,12 @@ fun SettingsScreen(
                             steps = 28,
                             modifier = Modifier.weight(1f)
                         )
-                        Text("${skipSeconds}s", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
+                        Text(stringResource(R.string.settings_skip_seconds_value, skipSeconds), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val subtitleOffsetMs = subtitleOffsetSteps * 250L
-                        Text("Subtitle Offset", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.width(120.dp))
+                        Text(stringResource(R.string.settings_subtitle_offset_title), color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.width(120.dp))
                         Slider(
                             value = subtitleOffsetSteps.toFloat(),
                             onValueChange = {
@@ -290,7 +293,7 @@ fun SettingsScreen(
                             modifier = Modifier.weight(1f)
                         )
                         Text(
-                            String.format(Locale.US, "%.2fs", subtitleOffsetMs / 1000f),
+                            stringResource(R.string.settings_seconds_value, subtitleOffsetMs / 1000f),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 13.sp,
                             textAlign = TextAlign.End,
@@ -311,12 +314,12 @@ fun SettingsScreen(
                         Icon(Icons.Default.HighQuality, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("YouTube Quality", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                            Text("Skip quality picker when sharing videos", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_youtube_quality_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            Text(stringResource(R.string.settings_youtube_quality_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         }
                         Box {
                             TextButton(onClick = { showYoutubeQualityMenu = true }) {
-                                Text(youtubeResolutionLabel(preferredYoutubeResolution))
+                                Text(stringResource(YOUTUBE_RESOLUTION_OPTIONS.firstOrNull { it.key == preferredYoutubeResolution }?.labelRes ?: R.string.option_youtube_quality_ask))
                             }
                             DropdownMenu(
                                 expanded = showYoutubeQualityMenu,
@@ -324,7 +327,7 @@ fun SettingsScreen(
                             ) {
                                 YOUTUBE_RESOLUTION_OPTIONS.forEach { option ->
                                     DropdownMenuItem(
-                                        text = { Text(option.label) },
+                                        text = { Text(stringResource(option.labelRes)) },
                                         onClick = {
                                             preferredYoutubeResolution = option.key
                                             prefs.edit { putString(PREF_YOUTUBE_RESOLUTION, option.key) }
@@ -341,8 +344,8 @@ fun SettingsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Spacer(Modifier.width(40.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Auto YouTube Subtitles", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
-                            Text("Use your preferred captions when quality picker is skipped", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_auto_youtube_subtitles_title), fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                            Text(stringResource(R.string.settings_auto_youtube_subtitles_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         }
                         Switch(
                             checked = autoYoutubeSubtitles,
@@ -358,12 +361,13 @@ fun SettingsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Spacer(Modifier.width(40.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Subtitle Language", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
-                            Text("Default is Japanese when available", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_subtitle_language_title), fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                            Text(stringResource(R.string.settings_subtitle_language_body), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         }
                         Box {
                             TextButton(onClick = { showYoutubeSubtitleLanguageMenu = true }, enabled = autoYoutubeSubtitles) {
-                                Text(YOUTUBE_SUBTITLE_LANGUAGE_OPTIONS.firstOrNull { it.key == preferredYoutubeSubtitleLanguage }?.label ?: preferredYoutubeSubtitleLanguage)
+                                val labelRes = YOUTUBE_SUBTITLE_LANGUAGE_OPTIONS.firstOrNull { it.key == preferredYoutubeSubtitleLanguage }?.labelRes
+                                Text(if (labelRes != null) stringResource(labelRes) else preferredYoutubeSubtitleLanguage)
                             }
                             DropdownMenu(
                                 expanded = showYoutubeSubtitleLanguageMenu,
@@ -371,7 +375,7 @@ fun SettingsScreen(
                             ) {
                                 YOUTUBE_SUBTITLE_LANGUAGE_OPTIONS.forEach { option ->
                                     DropdownMenuItem(
-                                        text = { Text(option.label) },
+                                        text = { Text(stringResource(option.labelRes)) },
                                         onClick = {
                                             preferredYoutubeSubtitleLanguage = option.key
                                             prefs.edit { putString(PREF_YOUTUBE_SUBTITLE_LANGUAGE, option.key) }
@@ -395,8 +399,8 @@ fun SettingsScreen(
                     Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Version", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                        Text("$appVersion (朗語)", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(stringResource(R.string.settings_version_title), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text(stringResource(R.string.settings_version_value, appVersion), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                     TextButton(
                         enabled = !isCheckingUpdate,
@@ -408,7 +412,7 @@ fun SettingsScreen(
                                 if (info != null && pInfo != null && isUpdateAvailable(info, pInfo.versionName, pInfo.lastUpdateTime)) {
                                     manualUpdateInfo = info
                                 } else {
-                                    Toast.makeText(context, "朗語 is up to date.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, appUpToDateToast, Toast.LENGTH_SHORT).show()
                                 }
                                 prefs.edit { putLong("last_update_check", System.currentTimeMillis()) }
                                 isCheckingUpdate = false
@@ -418,7 +422,7 @@ fun SettingsScreen(
                         if (isCheckingUpdate) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         } else {
-                            Text("Check")
+                            Text(stringResource(R.string.common_check))
                         }
                     }
                 }
@@ -427,18 +431,19 @@ fun SettingsScreen(
     }
 
     manualUpdateInfo?.let { info ->
+        val fallbackUpdateBody = stringResource(R.string.settings_update_available_body)
         AlertDialog(
             onDismissRequest = { manualUpdateInfo = null },
-            title = { Text("Update Available (${info.tagName})", fontWeight = FontWeight.Bold) },
-            text = { Text(info.body.ifBlank { "A new version of 朗語 is available." }, fontSize = 12.sp) },
+            title = { Text(stringResource(R.string.settings_update_available_title, info.tagName), fontWeight = FontWeight.Bold) },
+            text = { Text(info.body.ifBlank { fallbackUpdateBody }, fontSize = 12.sp) },
             confirmButton = {
                 Button(onClick = {
                     manualUpdateInfo = null
                     downloadAndInstallUpdate(context, info.downloadUrl)
-                }) { Text("Update Now") }
+                }) { Text(stringResource(R.string.settings_update_now)) }
             },
             dismissButton = {
-                TextButton(onClick = { manualUpdateInfo = null }) { Text("Later") }
+                TextButton(onClick = { manualUpdateInfo = null }) { Text(stringResource(R.string.common_later)) }
             }
         )
     }
@@ -500,15 +505,15 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Manage Dictionaries") },
+                title = { Text(stringResource(R.string.settings_manage_dictionaries_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 },
                 actions = {
                     IconButton(onClick = { dictLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed")) }, enabled = !isImporting) {
-                        Icon(Icons.Default.Add, contentDescription = "Import", tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.common_import), tint = MaterialTheme.colorScheme.primary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -529,7 +534,7 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
 
             if (installedDicts.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No dictionaries installed.\nTap + to import a Yomitan ZIP.", color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                    Text(stringResource(R.string.settings_no_dictionaries), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -547,16 +552,16 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
 
                                     Row {
                                         IconButton(onClick = { moveDict(dictName, true) }, enabled = sortedDicts.indexOf(dictName) > 0) {
-                                            Icon(Icons.Default.ArrowUpward, contentDescription = "Move Up", tint = if (sortedDicts.indexOf(dictName) > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant)
+                                            Icon(Icons.Default.ArrowUpward, contentDescription = stringResource(R.string.common_move_up), tint = if (sortedDicts.indexOf(dictName) > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant)
                                         }
                                         IconButton(onClick = { moveDict(dictName, false) }, enabled = sortedDicts.indexOf(dictName) < sortedDicts.size - 1) {
-                                            Icon(Icons.Default.ArrowDownward, contentDescription = "Move Down", tint = if (sortedDicts.indexOf(dictName) < sortedDicts.size - 1) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant)
+                                            Icon(Icons.Default.ArrowDownward, contentDescription = stringResource(R.string.common_move_down), tint = if (sortedDicts.indexOf(dictName) < sortedDicts.size - 1) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant)
                                         }
                                         IconButton(onClick = {
                                             engine.deleteDict(dictName)
                                             installedDicts = engine.getInstalledDictionaries()
                                         }) {
-                                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.common_delete), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                     }
                                 }
@@ -567,7 +572,7 @@ fun DictionarySettingsScreen(onBack: () -> Unit) {
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            "Collapse dictionary block",
+                                            stringResource(R.string.settings_collapse_dictionary_block),
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             fontSize = 13.sp,
                                             modifier = Modifier.weight(1f)

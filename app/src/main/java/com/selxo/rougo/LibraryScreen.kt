@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -58,7 +59,7 @@ private fun LibraryControlsCollapseHandle(
         )
         Icon(
             imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-            contentDescription = if (expanded) "Collapse library controls" else "Expand library controls",
+            contentDescription = stringResource(if (expanded) R.string.library_collapse_controls else R.string.library_expand_controls),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 10.dp).size(18.dp)
         )
@@ -83,6 +84,27 @@ fun LibraryScreen(
     val importScope = rememberCoroutineScope()
     val libraryManager = remember { LibraryManager(context) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val deletedDownloadToast = stringResource(R.string.library_deleted_download_toast)
+    val deleteDownloadFailedToast = stringResource(R.string.library_delete_download_failed_toast)
+    val downloadedVideoToast = stringResource(R.string.library_downloaded_video_toast)
+    val downloadFailedToast = stringResource(R.string.library_download_failed_toast)
+    val filterOptions = remember {
+        listOf(
+            "All" to R.string.library_filter_all,
+            "Audio" to R.string.library_filter_audio,
+            "Video" to R.string.library_filter_video,
+            "YouTube" to R.string.library_filter_youtube,
+            "Local" to R.string.library_filter_local
+        )
+    }
+    val sortOptions = remember {
+        listOf(
+            "Recent" to R.string.library_sort_recent,
+            "Title" to R.string.library_sort_title,
+            "Progress" to R.string.library_sort_progress,
+            "Recordings" to R.string.library_sort_recordings
+        )
+    }
 
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingMediaUri by remember { mutableStateOf<Uri?>(null) }
@@ -215,26 +237,26 @@ fun LibraryScreen(
         containerColor = Color.Transparent,
         floatingActionButton = {
             FloatingActionButton(onClick = { mediaLauncher.launch(arrayOf("audio/*", "video/*")) }, containerColor = MaterialTheme.colorScheme.primary) {
-                Icon(Icons.Default.Add, contentDescription = "Add", tint = MaterialTheme.colorScheme.onPrimary)
+                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.common_add), tint = MaterialTheme.colorScheme.onPrimary)
             }
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text("Library", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
+                    Text(stringResource(R.string.library_title), fontSize = 30.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
                     Text(
-                        "${items.size} items | $inProgressCount started | $totalRecordings recordings",
+                        stringResource(R.string.library_summary, items.size, inProgressCount, totalRecordings),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { showHelpDialog = true }) {
-                        Icon(Icons.Default.HelpOutline, contentDescription = "Help", tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Default.HelpOutline, contentDescription = stringResource(R.string.common_help), tint = MaterialTheme.colorScheme.primary)
                     }
                     IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.common_settings), tint = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
@@ -250,11 +272,11 @@ fun LibraryScreen(
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear search")
+                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.library_clear_search))
                         }
                     }
                 },
-                placeholder = { Text("Search library") },
+                placeholder = { Text(stringResource(R.string.library_search_placeholder)) },
                 shape = RoundedCornerShape(12.dp)
             )
 
@@ -268,7 +290,7 @@ fun LibraryScreen(
                 ) {
                     Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Stream or download video link")
+                    Text(stringResource(R.string.library_stream_or_download_link))
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -280,7 +302,7 @@ fun LibraryScreen(
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Browse YouTube")
+                    Text(stringResource(R.string.library_browse_youtube))
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
@@ -295,11 +317,11 @@ fun LibraryScreen(
 
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
-                    items(listOf("All", "Audio", "Video", "YouTube", "Local")) { filter ->
+                    items(filterOptions) { (filter, labelRes) ->
                         FilterChip(
                             selected = selectedFilter == filter,
                             onClick = { selectedFilter = filter },
-                            label = { Text(filter) },
+                            label = { Text(stringResource(labelRes)) },
                             leadingIcon = if (selectedFilter == filter) {
                                 { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
                             } else null
@@ -311,12 +333,12 @@ fun LibraryScreen(
                     TextButton(onClick = { showSortMenu = true }) {
                         Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(sortMode)
+                        Text(stringResource(sortOptions.firstOrNull { it.first == sortMode }?.second ?: R.string.library_sort_recent))
                     }
                     DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
-                        listOf("Recent", "Title", "Progress", "Recordings").forEach { option ->
+                        sortOptions.forEach { (option, labelRes) ->
                             DropdownMenuItem(
-                                text = { Text(option) },
+                                text = { Text(stringResource(labelRes)) },
                                 onClick = {
                                     sortMode = option
                                     showSortMenu = false
@@ -338,9 +360,9 @@ fun LibraryScreen(
                     Column(modifier = Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(44.dp))
                         Spacer(Modifier.height(12.dp))
-                        Text("No media yet", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.library_no_media_title), color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            "Add local audio/video or share a YouTube link into 朗語.",
+                            stringResource(R.string.library_no_media_body),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             fontSize = 13.sp
@@ -349,7 +371,7 @@ fun LibraryScreen(
                 }
             } else if (filteredItems.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No matching items", color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                    Text(stringResource(R.string.library_no_matching_items), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -378,9 +400,9 @@ fun LibraryScreen(
                                         libraryManager.saveItem(updatedItem)
                                         downloadStates.remove(item.id)
                                         onRefresh()
-                                        Toast.makeText(context, "Deleted downloaded file.", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, deletedDownloadToast, Toast.LENGTH_SHORT).show()
                                     } else {
-                                        Toast.makeText(context, "Download file could not be removed.", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, deleteDownloadFailedToast, Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             } else {
@@ -402,10 +424,10 @@ fun LibraryScreen(
                                                 libraryManager.saveItem(downloadedItem)
                                                 downloadStates[item.id] = LibraryDownloadState.Complete
                                                 onRefresh()
-                                                Toast.makeText(context, "Downloaded video.", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, downloadedVideoToast, Toast.LENGTH_SHORT).show()
                                             } else {
                                                 downloadStates.remove(item.id)
-                                                Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                                                Toast.makeText(context, downloadFailedToast, Toast.LENGTH_LONG).show()
                                             }
                                         }
                                     }
@@ -425,10 +447,10 @@ fun LibraryScreen(
     pendingDeleteItem?.let { item ->
         AlertDialog(
             onDismissRequest = { pendingDeleteItem = null },
-            title = { Text("Delete video?") },
+            title = { Text(stringResource(R.string.library_delete_video_title)) },
             text = {
                 Text(
-                    "This video has ${item.recordings.size} recordings. Deleting it will also delete its downloaded video, recordings, subtitles, and cached artwork."
+                    stringResource(R.string.library_delete_video_body, item.recordings.size)
                 )
             },
             confirmButton = {
@@ -437,11 +459,11 @@ fun LibraryScreen(
                         pendingDeleteItem = null
                         onDelete(item)
                     }
-                ) { Text("Delete") }
+                ) { Text(stringResource(R.string.common_delete)) }
             },
             dismissButton = {
                 OutlinedButton(onClick = { pendingDeleteItem = null }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.common_cancel))
                 }
             }
         )
@@ -450,13 +472,13 @@ fun LibraryScreen(
     if (showAddDialog) {
         AlertDialog(
             onDismissRequest = { if (!isImportingMedia) showAddDialog = false },
-            title = { Text("Add Subtitles?") },
+            title = { Text(stringResource(R.string.library_add_subtitles_title)) },
             text = {
                 Text(
                     if (isImportingMedia) {
-                        "Reading embedded metadata and cover art..."
+                        stringResource(R.string.library_reading_metadata)
                     } else {
-                        "Would you like to attach a subtitle file (.srt, .vtt, .ass) to '$pendingTitle'?"
+                        stringResource(R.string.library_add_subtitles_body, pendingTitle)
                     }
                 )
             },
@@ -464,13 +486,13 @@ fun LibraryScreen(
                 Button(
                     onClick = { subtitleLauncher.launch(arrayOf("*/*")) },
                     enabled = !isImportingMedia
-                ) { Text("Select Subtitles") }
+                ) { Text(stringResource(R.string.library_select_subtitles)) }
             },
             dismissButton = {
                 OutlinedButton(
                     onClick = { savePendingMedia(null) },
                     enabled = !isImportingMedia
-                ) { Text("Skip") }
+                ) { Text(stringResource(R.string.common_skip)) }
             }
         )
     }
@@ -478,7 +500,7 @@ fun LibraryScreen(
     if (showLinkDialog) {
         AlertDialog(
             onDismissRequest = { if (!isDownloadingLink) showLinkDialog = false },
-            title = { Text("Add Video Link") },
+            title = { Text(stringResource(R.string.library_add_video_link_title)) },
             text = {
                 Column {
                     OutlinedTextField(
@@ -486,8 +508,8 @@ fun LibraryScreen(
                         onValueChange = { linkText = it },
                         singleLine = true,
                         enabled = !isDownloadingLink,
-                        label = { Text("Video URL") },
-                        placeholder = { Text("https://...") },
+                        label = { Text(stringResource(R.string.library_video_url_label)) },
+                        placeholder = { Text(stringResource(R.string.library_url_placeholder)) },
                         modifier = Modifier.fillMaxWidth()
                     )
                     if (isDownloadingLink) {
@@ -505,7 +527,7 @@ fun LibraryScreen(
                         linkText = ""
                         onAddLink(url)
                     }
-                ) { Text("Stream") }
+                ) { Text(stringResource(R.string.common_stream)) }
             },
             dismissButton = {
                 TextButton(
@@ -521,16 +543,16 @@ fun LibraryScreen(
                             if (downloadedItem != null) {
                                 libraryManager.saveItem(downloadedItem)
                                 onRefresh()
-                                Toast.makeText(context, "Downloaded video.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, downloadedVideoToast, Toast.LENGTH_SHORT).show()
                                 showLinkDialog = false
                                 linkText = ""
                             } else {
-                                Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, downloadFailedToast, Toast.LENGTH_LONG).show()
                             }
                             isDownloadingLink = false
                         }
                     }
-                ) { Text("Download") }
+                ) { Text(stringResource(R.string.common_download)) }
             }
         )
     }
