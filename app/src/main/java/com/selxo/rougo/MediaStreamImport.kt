@@ -1,129 +1,44 @@
 package com.selxo.rougo
-import android.app.DownloadManager
+
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.IntentFilter
-import androidx.core.content.FileProvider
-import java.net.HttpURLConnection
-import java.net.URL
-import android.Manifest
-import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
-import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
-import android.provider.OpenableColumns
-import android.util.Size
 import android.util.Log
-import android.webkit.CookieManager
+import android.util.Size
 import android.webkit.JavascriptInterface
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.SystemBarStyle
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.MenuBook
-import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.edit
-import androidx.core.net.toUri
-import androidx.core.view.WindowCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.lifecycleScope
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import com.selxo.rougo.dictionary.DeinflectorRegistry
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.UUID
-import kotlin.math.roundToInt
-import kotlin.system.exitProcess
-
-// --- YT-DLP IMPORTS ---
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.ffmpeg.execute
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
-
-// --- IMPORT ALIASES ---
-import android.media.MediaPlayer as AndroidMediaPlayer
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media as VLCMedia
-import org.videolan.libvlc.MediaPlayer as VLCMediaPlayer
-import org.videolan.libvlc.util.VLCVideoLayout
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 internal data class YoutubeSubtitleChoice(
     val label: String,
@@ -280,20 +195,6 @@ private fun fastYoutubeFormatSelector(preferredResolution: String): String {
         }
     }
 }
-private fun parseYtdlpPrintOutput(output: String): Map<String, String> {
-    val expectedKeys = setOf("title", "format_id", "url", "vcodec", "http_headers")
-    return output.lineSequence()
-        .map { it.trim() }
-        .filter { it.isNotBlank() }
-        .mapNotNull { line ->
-            val separatorIndex = line.indexOf(':')
-            if (separatorIndex <= 0) return@mapNotNull null
-            val key = line.substring(0, separatorIndex)
-            if (key !in expectedKeys) return@mapNotNull null
-            key to line.substring(separatorIndex + 1).trim()
-        }
-        .toMap()
-}
 private fun cleanYtdlpPrintedValue(value: String?): String? {
     return value
         ?.trim()
@@ -371,58 +272,6 @@ internal fun createFastYoutubeLibraryItem(stream: FastYoutubeStream, sourceUrl: 
         httpUserAgent = stream.httpUserAgent,
         httpReferer = stream.httpReferer
     )
-}
-private fun addWebViewCookiesOption(context: Context, request: YoutubeDLRequest, sourceUrl: String) {
-    if (!isYoutubeUrl(sourceUrl)) return
-    val cookieFile = exportWebViewCookiesForYtDlp(context) ?: return
-    request.addOption("--cookies", cookieFile.absolutePath)
-}
-private fun exportWebViewCookiesForYtDlp(context: Context): File? {
-    return try {
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.flush()
-
-        val cookieSources = listOf(
-            "https://www.youtube.com/" to ".youtube.com",
-            "https://m.youtube.com/" to ".youtube.com",
-            "https://youtube.com/" to ".youtube.com",
-            "https://accounts.youtube.com/" to ".youtube.com",
-            "https://www.google.com/" to ".google.com",
-            "https://accounts.google.com/" to ".google.com"
-        )
-
-        val lines = mutableListOf("# Netscape HTTP Cookie File")
-        val seen = mutableSetOf<String>()
-
-        cookieSources.forEach { (url, domain) ->
-            val rawCookies = cookieManager.getCookie(url).orEmpty()
-            rawCookies.split(";")
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .forEach { cookie ->
-                    val separatorIndex = cookie.indexOf('=')
-                    if (separatorIndex <= 0) return@forEach
-
-                    val name = cookie.substring(0, separatorIndex).trim()
-                    val value = cookie.substring(separatorIndex + 1).trim()
-                    if (name.isBlank()) return@forEach
-
-                    val key = "$domain\t$name"
-                    if (seen.add(key)) {
-                        lines += listOf(domain, "TRUE", "/", "TRUE", "0", name, value).joinToString("\t")
-                    }
-                }
-        }
-
-        if (lines.size == 1) return null
-
-        File(context.cacheDir, "yt-dlp-webview-cookies.txt").also { file ->
-            file.writeText(lines.joinToString("\n") + "\n", Charsets.UTF_8)
-        }
-    } catch (t: Throwable) {
-        CrashReporter.recordHandled(context, "Export WebView cookies", t)
-        null
-    }
 }
 internal class YoutubeBrowserBridge(
     private val onVideoUrl: (String) -> Unit
