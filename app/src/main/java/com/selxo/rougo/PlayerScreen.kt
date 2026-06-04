@@ -1,67 +1,35 @@
 package com.selxo.rougo
-import android.app.DownloadManager
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.IntentFilter
-import androidx.core.content.FileProvider
-import java.net.HttpURLConnection
-import java.net.URL
+
 import android.Manifest
-import android.app.Application
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
-import android.media.MediaRecorder
+import android.media.MediaPlayer as AndroidMediaPlayer
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
-import android.os.Looper
 import android.os.ParcelFileDescriptor
-import android.provider.OpenableColumns
 import android.util.Size
-import android.util.Log
-import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.MenuBook
-import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -70,56 +38,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
-import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.lifecycleScope
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import com.selxo.rougo.dictionary.DeinflectorRegistry
+import java.io.File
+import java.net.URL
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.UUID
-import kotlin.math.roundToInt
-import kotlin.system.exitProcess
-
-// --- YT-DLP IMPORTS ---
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.ffmpeg.execute
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
-
-// --- IMPORT ALIASES ---
-import android.media.MediaPlayer as AndroidMediaPlayer
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media as VLCMedia
 import org.videolan.libvlc.MediaPlayer as VLCMediaPlayer
@@ -177,6 +116,8 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
     var showBacklog by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    var embeddedSubtitlesEnabled by remember(libraryItem.id) { mutableStateOf(libraryItem.subtitleUri != null) }
+    var selectedEmbeddedSubtitleTrackId by remember(libraryItem.id) { mutableIntStateOf(-1) }
 
     val initialPlayableUri = remember(libraryItem.id) { initialPlayableMediaUri(libraryItem) }
     var actualMediaUri by remember(libraryItem.id) { mutableStateOf(initialPlayableUri) }
@@ -246,6 +187,50 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         resumePlaybackAfterDictionaryDismiss = false
         if (shouldResumeAfterDismiss && actualMediaUri != null && !vlcPlayer.isPlaying) {
             playMainPlayer()
+        }
+    }
+
+    fun toggleRepeatPractice(segment: ShadowRecording, collapseBacklogOnStart: Boolean = false) {
+        if (repeatPracticeSegment?.id == segment.id) {
+            repeatPracticeSegment = null
+        } else {
+            activeOriginalSegment = null
+            repeatAttemptCount = 0
+            repeatPracticeSegment = segment
+            if (collapseBacklogOnStart) showBacklog = false
+        }
+    }
+
+    fun syncEmbeddedSubtitleState(spuTracks: Array<org.videolan.libvlc.MediaPlayer.TrackDescription>) {
+        val currentTrackId = runCatching { vlcPlayer.spuTrack }.getOrDefault(-1)
+        if (currentTrackId != -1) {
+            selectedEmbeddedSubtitleTrackId = currentTrackId
+            embeddedSubtitlesEnabled = true
+        } else if (libraryItem.subtitleUri != null) {
+            embeddedSubtitlesEnabled = isSubtitlesVisible
+        } else if (spuTracks.any { it.id != -1 }) {
+            embeddedSubtitlesEnabled = false
+        }
+    }
+
+    fun setEmbeddedSubtitlesEnabled(
+        enabled: Boolean,
+        spuTracks: Array<org.videolan.libvlc.MediaPlayer.TrackDescription>
+    ) {
+        if (enabled) {
+            val trackId = selectedEmbeddedSubtitleTrackId
+                .takeIf { it != -1 && spuTracks.any { track -> track.id == it } }
+                ?: spuTracks.firstOrNull { it.id != -1 }?.id
+            if (trackId != null) {
+                vlcPlayer.spuTrack = trackId
+                selectedEmbeddedSubtitleTrackId = trackId
+            }
+            isSubtitlesVisible = true
+            embeddedSubtitlesEnabled = true
+        } else {
+            vlcPlayer.spuTrack = -1
+            isSubtitlesVisible = false
+            embeddedSubtitlesEnabled = false
         }
     }
 
@@ -494,6 +479,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 val updatedItem = libraryItem.copy(subtitleUri = subtitleUri)
                 libraryItem = updatedItem
                 isSubtitlesVisible = true
+                embeddedSubtitlesEnabled = true
                 selectedYoutubeSubtitleKey = null
                 LibraryManager(context).saveItem(updatedItem)
             }
@@ -834,6 +820,8 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                     if (uri != null) {
                         context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         libraryItem = libraryItem.copy(subtitleUri = uri.toString())
+                        isSubtitlesVisible = true
+                        embeddedSubtitlesEnabled = true
                     }
                 }
 
@@ -873,7 +861,10 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         )
 
                         LaunchedEffect(showSubMenu) {
-                            if (showSubMenu) spuTracks = vlcPlayer.spuTracks ?: emptyArray()
+                            if (showSubMenu) {
+                                spuTracks = vlcPlayer.spuTracks ?: emptyArray()
+                                syncEmbeddedSubtitleState(spuTracks)
+                            }
                         }
 
                         LaunchedEffect(showSubMenu, libraryItem.sourceUrl) {
@@ -926,6 +917,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                                 if (subtitleUri != null) {
                                                     libraryItem = libraryItem.copy(subtitleUri = subtitleUri)
                                                     isSubtitlesVisible = true
+                                                    embeddedSubtitlesEnabled = true
                                                     LibraryManager(context).saveItem(libraryItem)
                                                 } else {
                                                     Toast.makeText(context, "Subtitle download failed.", Toast.LENGTH_SHORT).show()
@@ -956,6 +948,8 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                     onClick = {
                                         vlcPlayer.spuTrack = track.id
                                         isSubtitlesVisible = true
+                                        embeddedSubtitlesEnabled = true
+                                        selectedEmbeddedSubtitleTrackId = track.id
                                         showSubMenu = false
                                     }
                                 )
@@ -963,10 +957,9 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                         }
 
                         DropdownMenuItem(
-                            text = { Text("Disable Embedded Subs") },
+                            text = { Text(if (embeddedSubtitlesEnabled) "Disable Embedded Subs" else "Enable Embedded Subs") },
                             onClick = {
-                                vlcPlayer.spuTrack = -1
-                                isSubtitlesVisible = false
+                                setEmbeddedSubtitlesEnabled(!embeddedSubtitlesEnabled, spuTracks)
                                 showSubMenu = false
                             }
                         )
@@ -1177,7 +1170,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onSeekOriginal = { targetMs -> seekMainPlayer(targetMs, resumeAfterSeek = false) },
                             onSeekVoice = { targetMs -> seekVoiceSegment(latest, targetMs) },
                             onRepeatPractice = {
-                                repeatPracticeSegment = if (repeatPracticeSegment?.id == latest.id) null else latest
+                                toggleRepeatPractice(latest)
                             },
                             onDelete = {
                                 try { File(latest.filePath).delete() } catch (e: Exception) {}
@@ -1235,7 +1228,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             onSeekOriginal = { targetMs -> seekMainPlayer(targetMs, resumeAfterSeek = false) },
                             onSeekVoice = { targetMs -> seekVoiceSegment(rec, targetMs) },
                             onRepeatPractice = {
-                                repeatPracticeSegment = if (repeatPracticeSegment?.id == rec.id) null else rec
+                                toggleRepeatPractice(rec, collapseBacklogOnStart = true)
                             },
                             onDelete = {
                                 try { File(rec.filePath).delete() } catch (e: Exception) {}
@@ -1260,7 +1253,3 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         }
     }
 }
-
-// ==========================================
-// 4. COMPONENTS & HELPERS
-// ==========================================
