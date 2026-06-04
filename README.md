@@ -14,13 +14,9 @@
 |:---:|:---:|:---:|
 | <img src="media/screenshots/shadowing-waveform.jpg" alt="Shadowing screen with subtitle text, recording controls, waveform comparison, and repeat segment button" width="220"> | <img src="media/screenshots/dictionary-popup.jpg" alt="Dictionary popup showing a Japanese lookup with reading, pitch accent, and dictionary entries" width="220"> | <img src="media/screenshots/settings-overview.jpg" alt="Settings screen with theme, dictionaries, target language, noise cancellation, and player controls" width="220"> |
 
-| Light Purple | Light Green | Dark Teal |
-|:---:|:---:|:---:|
-| <img src="media/screenshots/light-mode-settings.jpg" alt="Light mode settings screen with a purple accent color" width="220"> | <img src="media/screenshots/light-green-accent.jpg" alt="Light settings screen with a green accent color" width="220"> | <img src="media/screenshots/dark-teal-accent.jpg" alt="Dark settings screen with a teal accent color" width="220"> |
-
-| Dark Orange | Light Blue |
-|:---:|:---:|
-| <img src="media/screenshots/dark-orange-accent.jpg" alt="Dark settings screen with an orange accent color" width="220"> | <img src="media/screenshots/light-blue-accent.jpg" alt="Light settings screen with a blue accent color" width="220"> |
+| Color Themes |
+|:---:|
+| <img src="media/screenshots/light-mode-settings.jpg" alt="Light mode settings screen with a purple accent color" width="150"> <img src="media/screenshots/light-green-accent.jpg" alt="Light settings screen with a green accent color" width="150"> <img src="media/screenshots/dark-teal-accent.jpg" alt="Dark settings screen with a teal accent color" width="150"> <img src="media/screenshots/dark-orange-accent.jpg" alt="Dark settings screen with an orange accent color" width="150"> <img src="media/screenshots/light-blue-accent.jpg" alt="Light settings screen with a blue accent color" width="150"> |
 
 ## Highlights
 
