@@ -1,5 +1,12 @@
 # Changelog
 
+## V2.7.4 - 2026-06-05
+
+- Added playback for repeat shadowing attempts and paused the source during attempt playback.
+- Switched player media and downloads to native Android notifications.
+- Suppressed extra foreground download completion notifications.
+- Prepared UI strings for localization.
+
 ## V2.7.3 - 2026-06-04
 
 - Synced player repeat controls and subtitle toggles.
