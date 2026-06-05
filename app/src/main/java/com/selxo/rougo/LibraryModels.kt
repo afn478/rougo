@@ -141,12 +141,13 @@ private fun isAppOwnedFile(context: Context, file: File): Boolean {
         filePath == rootPath || filePath.startsWith("$rootPath${File.separator}")
     }
 }
-internal fun LibraryItem.displaySourceLabel(): String {
+internal fun LibraryItem.displaySourceLabel(context: Context): String {
     val source = sourceUrl
     return when {
-        source != null && hasDownloadedLocalCopy() -> "${streamSourceLabel(source)} (local)"
-        source != null -> streamSourceLabel(source)
-        isVideo -> "Video"
-        else -> "Audio"
+        source != null && hasDownloadedLocalCopy() ->
+            context.getString(R.string.media_source_local_format, streamSourceLabel(context, source))
+        source != null -> streamSourceLabel(context, source)
+        isVideo -> context.getString(R.string.media_source_video)
+        else -> context.getString(R.string.media_source_audio)
     }
 }

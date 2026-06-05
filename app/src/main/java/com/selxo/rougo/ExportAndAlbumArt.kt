@@ -32,7 +32,7 @@ fun exportRecording(context: Context, file: File) {
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(shareIntent, "Share Segment"))
+        context.startActivity(Intent.createChooser(shareIntent, context.getString(R.string.export_share_segment)))
     } catch (e: Exception) {
         try {
             val values = android.content.ContentValues().apply {
@@ -49,17 +49,17 @@ fun exportRecording(context: Context, file: File) {
                         input.copyTo(out)
                     }
                 }
-                Toast.makeText(context, "Exported to Music/Rougo!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.export_saved_to_music_toast), Toast.LENGTH_SHORT).show()
 
                 val viewIntent = Intent(Intent.ACTION_SEND).apply {
                     type = "audio/mp4"
                     putExtra(Intent.EXTRA_STREAM, uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                context.startActivity(Intent.createChooser(viewIntent, "Share Segment"))
+                context.startActivity(Intent.createChooser(viewIntent, context.getString(R.string.export_share_segment)))
             }
         } catch (ex: Exception) {
-            Toast.makeText(context, "Export failed: ${ex.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.export_failed_toast, ex.message.orEmpty()), Toast.LENGTH_SHORT).show()
         }
     }
 }

@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,7 +61,7 @@ fun AudioWaveformComparison(
             color = accent,
             pitchColor = MaterialTheme.colorScheme.secondary,
             cursorColor = accent,
-            label = "Original",
+            label = stringResource(R.string.waveform_original),
             onClick = onPlayOriginal,
             onSeek = onSeekOriginal,
             isPlaying = isOriginalPlaying,
@@ -74,7 +75,7 @@ fun AudioWaveformComparison(
             color = recordedColor,
             pitchColor = MaterialTheme.colorScheme.secondary,
             cursorColor = accent,
-            label = "Recorded",
+            label = stringResource(R.string.waveform_recorded),
             onClick = onPlayVoice,
             onSeek = onSeekVoice,
             isPlaying = isRecordedPlaying,
@@ -127,7 +128,7 @@ fun WaveformTrack(
         ) {
             if (amplitudes.isEmpty()) {
                 Text(
-                    if (isLoading) "Analyzing $label..." else "$label audio unavailable",
+                    if (isLoading) stringResource(R.string.waveform_analyzing, label) else stringResource(R.string.waveform_audio_unavailable, label),
                     color = Color.Gray,
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -216,7 +217,7 @@ fun LibraryCard(
     val progressPct = if (item.duration > 0) (item.progress.toFloat() / item.duration.toFloat()) else 0f
     val albumArt = loadAlbumArt(context, item.mediaUri, item.isVideo, item.coverArtPath, item.id, item.sourceUrl)
     val metadataLine = item.metadataSummary()
-    val itemType = item.displaySourceLabel()
+    val itemType = item.displaySourceLabel(context)
     var showDownloadMenu by remember { mutableStateOf(false) }
 
     Card(
@@ -230,7 +231,7 @@ fun LibraryCard(
                 contentAlignment = Alignment.Center
             ) {
                 if (albumArt != null) {
-                    Image(bitmap = albumArt, contentDescription = "Cover", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    Image(bitmap = albumArt, contentDescription = stringResource(R.string.artwork_cover), contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 } else {
                     Icon(
                         if (item.isVideo) Icons.Default.Movie else Icons.Default.Audiotrack,
@@ -272,14 +273,14 @@ fun LibraryCard(
                         }
                     )
                     if (item.recordings.isNotEmpty()) {
-                        Text("${item.recordings.size} recordings", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(stringResource(R.string.library_recordings_count, item.recordings.size), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("${(progressPct * 100).toInt()}%", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.library_progress_percent, (progressPct * 100).toInt()), color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Text(
-                        if (item.subtitleUri != null) "Subtitles" else "No subtitles",
+                        stringResource(if (item.subtitleUri != null) R.string.library_has_subtitles else R.string.library_no_subtitles),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )
@@ -298,7 +299,7 @@ fun LibraryCard(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.common_delete), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (onDownload != null || onDeleteDownload != null || downloadState != LibraryDownloadState.Idle) {
                     Box {
@@ -319,10 +320,10 @@ fun LibraryCard(
                                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                                 }
                                 LibraryDownloadState.Complete -> {
-                                    Icon(Icons.Default.CheckCircle, contentDescription = "Downloaded", tint = MaterialTheme.colorScheme.primary)
+                                    Icon(Icons.Default.CheckCircle, contentDescription = stringResource(R.string.common_downloaded), tint = MaterialTheme.colorScheme.primary)
                                 }
                                 LibraryDownloadState.Idle -> {
-                                    Icon(Icons.Default.Download, contentDescription = "Download", tint = MaterialTheme.colorScheme.primary)
+                                    Icon(Icons.Default.Download, contentDescription = stringResource(R.string.common_download), tint = MaterialTheme.colorScheme.primary)
                                 }
                             }
                         }
@@ -331,7 +332,7 @@ fun LibraryCard(
                             onDismissRequest = { showDownloadMenu = false }
                         ) {
                             DropdownMenuItem(
-                                text = { Text("Delete download") },
+                                text = { Text(stringResource(R.string.library_delete_download)) },
                                 leadingIcon = {
                                     Icon(Icons.Default.Delete, contentDescription = null)
                                 },
@@ -406,18 +407,18 @@ fun RecordingItemCard(
         Column(modifier = Modifier.padding(12.dp).fillMaxWidth()) {
             Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Segment: ${formatTime(rec.startTime)} - ${formatTime(rec.endTime)}", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                    Text(stringResource(R.string.recording_segment_range, formatTime(rec.startTime), formatTime(rec.endTime)), color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
                     if (currentRecordedTime >= 0L) {
-                        Text("Recording: ${formatTime(currentRecordedTime)} / ${formatTime(segmentDuration)}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                        Text(stringResource(R.string.recording_position, formatTime(currentRecordedTime), formatTime(segmentDuration)), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                     }
                 }
                 Row {
                     IconButton(onClick = onShare, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Share, contentDescription = "Share", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Share, contentDescription = stringResource(R.string.common_share), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                     }
                     Spacer(Modifier.width(16.dp))
                     IconButton(onClick = onDelete, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.common_delete), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -457,7 +458,7 @@ fun RecordingItemCard(
             ) {
                 Icon(if (isRepeatPracticeActive) Icons.Default.Stop else Icons.Default.Repeat, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(if (isRepeatPracticeActive) "Stop Repeat" else "Repeat Segment", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(if (isRepeatPracticeActive) R.string.recording_stop_repeat else R.string.recording_repeat_segment), fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

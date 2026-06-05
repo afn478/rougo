@@ -1,11 +1,15 @@
 package com.selxo.rougo
 
+import android.Manifest
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,6 +42,8 @@ fun CrashReportDialog() {
     val context = LocalContext.current
     var crashText by remember { mutableStateOf(CrashReporter.readLastCrash(context)) }
     val scrollState = rememberScrollState()
+    val crashReportClipboardLabel = stringResource(R.string.dictionary_clipboard_crash_report_label)
+    val crashReportCopiedToast = stringResource(R.string.crash_report_copied_toast)
 
     if (crashText != null) {
         AlertDialog(
@@ -44,11 +51,11 @@ fun CrashReportDialog() {
                 CrashReporter.clearLastCrash(context)
                 crashText = null
             },
-            title = { Text("朗語 crashed last time", fontWeight = FontWeight.Bold) },
+            title = { Text(stringResource(R.string.crash_dialog_title), fontWeight = FontWeight.Bold) },
             text = {
                 Column(modifier = Modifier.heightIn(max = 320.dp).verticalScroll(scrollState)) {
                     Text(
-                        "The crash report was saved so this can be debugged.",
+                        stringResource(R.string.crash_dialog_body),
                         color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 13.sp
                     )
@@ -62,15 +69,15 @@ fun CrashReportDialog() {
             },
             confirmButton = {
                 Button(onClick = {
-                    copyTextToClipboard(context, "朗語 crash report", crashText.orEmpty())
-                    Toast.makeText(context, "Crash report copied", Toast.LENGTH_SHORT).show()
-                }) { Text("Copy") }
+                    copyTextToClipboard(context, crashReportClipboardLabel, crashText.orEmpty())
+                    Toast.makeText(context, crashReportCopiedToast, Toast.LENGTH_SHORT).show()
+                }) { Text(stringResource(R.string.common_copy)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     CrashReporter.clearLastCrash(context)
                     crashText = null
-                }) { Text("Clear") }
+                }) { Text(stringResource(R.string.common_clear)) }
             }
         )
     }
@@ -105,10 +112,10 @@ fun UpdateNotificationDialog() {
     if (showDialog && updateInfo != null) {
         AlertDialog(
             onDismissRequest = { showDialog = false },
-            title = { Text("Update Available (${updateInfo?.tagName})", fontWeight = FontWeight.Bold) },
+            title = { Text(stringResource(R.string.update_available_title, updateInfo?.tagName.orEmpty()), fontWeight = FontWeight.Bold) },
             text = {
                 Column {
-                    Text("A new version of 朗語 is available. Update now to access new features and bug fixes.")
+                    Text(stringResource(R.string.update_available_body))
                     if (updateInfo?.body?.isNotEmpty() == true) {
                         Spacer(Modifier.height(8.dp))
                         Text(updateInfo!!.body, fontSize = 12.sp, color = Color.Gray)
@@ -119,12 +126,12 @@ fun UpdateNotificationDialog() {
                 Button(onClick = {
                     showDialog = false
                     downloadAndInstallUpdate(context, updateInfo!!.downloadUrl)
-                }) { Text("Update Now") }
+                }) { Text(stringResource(R.string.settings_update_now)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     showDialog = false
-                }) { Text("Later") }
+                }) { Text(stringResource(R.string.common_later)) }
             }
         )
     }
@@ -134,18 +141,18 @@ fun HelpDialog(showDialog: Boolean, onDismiss: () -> Unit) {
     if (showDialog) {
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("Welcome to 朗語", fontWeight = FontWeight.Bold) },
+            title = { Text(stringResource(R.string.welcome_title), fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Add local audio/video from the Library, or paste/share a video link to stream or download it.")
-                    Text("Use headphones for shadowing so the microphone captures your voice instead of the source audio.")
-                    Text("Install multiple pitch and dictionary sources from Settings > Dictionaries for better lookups.")
-                    Text("This is built for listening and shadowing, not an Anki-mining workflow.")
-                    Text("Record short segments, compare the waveforms, then repeat the segment until the rhythm feels natural.")
+                    Text(stringResource(R.string.welcome_body_add_media))
+                    Text(stringResource(R.string.welcome_body_headphones))
+                    Text(stringResource(R.string.welcome_body_dictionaries))
+                    Text(stringResource(R.string.welcome_body_anki))
+                    Text(stringResource(R.string.welcome_body_shadowing))
                 }
             },
             confirmButton = {
-                Button(onClick = onDismiss) { Text("Done") }
+                Button(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
             }
         )
     }
@@ -237,7 +244,8 @@ fun MainAppFlow(
 fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem) -> Unit) {
     val context = LocalContext.current
     val uiScope = rememberCoroutineScope()
-    val sourceLabel = remember(url) { streamSourceLabel(url) }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val sourceLabel = remember(url) { streamSourceLabel(context, url) }
     val isYoutubeSource = remember(url) { isYoutubeUrl(url) }
     val downloadBeforePlayback = remember(url) { isBilibiliUrl(url) || isNiconicoUrl(url) }
     val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
@@ -250,7 +258,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
     val preferredSubtitleLanguage = remember {
         prefs.getString(PREF_YOUTUBE_SUBTITLE_LANGUAGE, DEFAULT_YOUTUBE_SUBTITLE_LANGUAGE) ?: DEFAULT_YOUTUBE_SUBTITLE_LANGUAGE
     }
-    var status by remember { mutableStateOf("Fetching $sourceLabel stream...") }
+    var status by remember(sourceLabel) { mutableStateOf(context.getString(R.string.stream_fetching_status, sourceLabel)) }
     var setupData by remember { mutableStateOf<YoutubeSetupData?>(null) }
     var subtitleChoices by remember { mutableStateOf<List<YoutubeSubtitleChoice>>(emptyList()) }
     var selectedFormat by remember { mutableStateOf<YoutubeStreamFormat?>(null) }
@@ -261,15 +269,18 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
     LaunchedEffect(url) {
         try {
             if (downloadBeforePlayback) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPlayerNotificationPermission(context)) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
                 isProcessing = true
-                status = "Downloading $sourceLabel video..."
+                status = context.getString(R.string.stream_downloading_status, sourceLabel)
                 val downloadedItem = withContext(Dispatchers.IO) {
                     downloadVideoLinkToLibraryItem(context, url)
                 }
                 if (downloadedItem != null) {
                     onComplete(downloadedItem)
                 } else {
-                    status = "$sourceLabel download failed."
+                    status = context.getString(R.string.stream_download_failed_status, sourceLabel)
                     delay(3000)
                     onDismiss()
                 }
@@ -278,7 +289,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
 
             if (preferredResolution != YOUTUBE_RESOLUTION_ASK) {
                 isProcessing = true
-                status = "Opening ${youtubeResolutionLabel(preferredResolution)}..."
+                status = context.getString(R.string.stream_opening_quality_status, youtubeResolutionLabel(context, preferredResolution))
                 val fastItem = withContext(Dispatchers.IO) {
                     fetchFastYoutubeStream(context, url, preferredResolution)
                         ?.let { createFastYoutubeLibraryItem(it, url) }
@@ -287,7 +298,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                     onComplete(fastItem)
                     return@LaunchedEffect
                 }
-                status = "Fetching $sourceLabel stream..."
+                status = context.getString(R.string.stream_fetching_status, sourceLabel)
             }
 
             val fetchedSetupData = withContext(Dispatchers.IO) {
@@ -306,15 +317,15 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                 val format = selectPreferredYoutubeFormat(fetchedSetupData.formats, preferredResolution)
                 if (format != null) {
                     isProcessing = true
-                    status = "Opening ${youtubeResolutionLabel(preferredResolution)}..."
+                    status = context.getString(R.string.stream_opening_quality_status, youtubeResolutionLabel(context, preferredResolution))
                     onComplete(createYoutubeLibraryItem(context, fetchedSetupData, format, null, url))
                 } else {
-                    status = "Preferred quality unavailable. Pick another format."
+                    status = context.getString(R.string.stream_preferred_quality_unavailable)
                     isProcessing = false
                 }
             }
         } catch (e: Exception) {
-            status = "Failed: ${e.localizedMessage}"
+            status = context.getString(R.string.stream_failed_status, e.localizedMessage.orEmpty())
             delay(3000)
             onDismiss()
         }
@@ -342,12 +353,16 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
         if (format != null) {
             isProcessing = true
             val selectedSubtitleLanguage = selectedSubtitleKey
-            status = if (selectedSubtitleLanguage != null) "Fetching subtitles..." else "Opening stream..."
+            status = if (selectedSubtitleLanguage != null) {
+                context.getString(R.string.stream_fetching_subtitles_status)
+            } else {
+                context.getString(R.string.stream_opening_status)
+            }
 
             val subtitleUri = resolveSelectedSubtitle()
 
             if (selectedSubtitleLanguage != null && subtitleUri == null) {
-                Toast.makeText(context, "Subtitle download failed; opening video without subtitles.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.stream_subtitle_download_failed_opening_toast), Toast.LENGTH_SHORT).show()
             }
             openSelectedFormat(format, subtitleUri)
         }
@@ -355,7 +370,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
 
     AlertDialog(
         onDismissRequest = { if (!isProcessing && setupData == null) onDismiss() },
-        title = { Text("$sourceLabel Setup", fontWeight = FontWeight.Bold) },
+        title = { Text(stringResource(R.string.stream_setup_title, sourceLabel), fontWeight = FontWeight.Bold) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 if (setupData == null || isProcessing) {
@@ -367,11 +382,11 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                     )
                 } else {
                     if (isYoutubeSource) {
-                        Text("1. Select Subtitles (Optional):", color = Color.LightGray, fontSize = 14.sp)
+                        Text(stringResource(R.string.stream_select_subtitles_step), color = Color.LightGray, fontSize = 14.sp)
                         Spacer(Modifier.height(8.dp))
 
                         if (subtitleChoices.isEmpty()) {
-                            Text("No captions found", color = Color.Gray, fontSize = 13.sp)
+                            Text(stringResource(R.string.stream_no_captions_found), color = Color.Gray, fontSize = 13.sp)
                         } else {
                             LazyColumn(modifier = Modifier.heightIn(max = 150.dp)) {
                                 items(subtitleChoices) { option ->
@@ -399,7 +414,11 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                         Spacer(modifier = Modifier.height(16.dp))
                     }
 
-                    Text(if (isYoutubeSource) "2. Select Quality:" else "1. Select Quality:", color = Color.LightGray, fontSize = 14.sp)
+                    Text(
+                        stringResource(if (isYoutubeSource) R.string.stream_select_quality_step_youtube else R.string.stream_select_quality_step_default),
+                        color = Color.LightGray,
+                        fontSize = 14.sp
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
 
                     val formats = setupData?.formats?.filter {
@@ -416,8 +435,8 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                     LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
                         items(formats) { format ->
                             val isAudioOnly = format.vcodec == "none"
-                            val resolutionText = if (isAudioOnly) "Audio Only" else {
-                                if (format.height > 0) "${format.height}p" else format.formatNote ?: "Standard"
+                            val resolutionText = if (isAudioOnly) stringResource(R.string.common_audio_only) else {
+                                if (format.height > 0) "${format.height}p" else format.formatNote ?: stringResource(R.string.common_standard)
                             }
                             Card(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { selectedFormat = format },
@@ -427,7 +446,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
                                     Icon(if (isAudioOnly) Icons.Default.Audiotrack else Icons.Default.HighQuality, contentDescription = null, modifier = Modifier.size(20.dp))
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Text(
-                                        text = "$resolutionText - ${format.ext}",
+                                        text = stringResource(R.string.stream_format_label, resolutionText, format.ext.orEmpty()),
                                         fontWeight = FontWeight.Medium, color = Color.White, fontSize = 14.sp
                                     )
                                 }
@@ -439,7 +458,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem)
         },
         confirmButton = {
             if (setupData == null || isProcessing) {
-                Button(onClick = onDismiss) { Text("Cancel") }
+                Button(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
             }
         }
     )

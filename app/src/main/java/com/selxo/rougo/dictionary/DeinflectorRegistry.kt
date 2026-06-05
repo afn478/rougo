@@ -1,5 +1,7 @@
 package com.selxo.rougo.dictionary
 
+import androidx.annotation.StringRes
+import com.selxo.rougo.R
 import com.selxo.rougo.dictionary.arabic.ArabicDeinflector
 import com.selxo.rougo.dictionary.chinese.ChineseDeinflector
 import com.selxo.rougo.dictionary.english.EnglishDeinflector
@@ -12,7 +14,7 @@ import com.selxo.rougo.dictionary.it.ItalianDeinflector
 
 data class DictionaryLanguageOption(
     val code: String,
-    val label: String,
+    @param:StringRes val labelRes: Int,
 )
 
 /**
@@ -22,16 +24,16 @@ object DeinflectorRegistry {
     const val DEFAULT_LANGUAGE = "ja"
 
     val languageOptions = listOf(
-        DictionaryLanguageOption("ja", "Japanese"),
-        DictionaryLanguageOption("en", "English"),
-        DictionaryLanguageOption("zh", "Chinese"),
-        DictionaryLanguageOption("ko", "Korean"),
-        DictionaryLanguageOption("ar", "Arabic"),
-        DictionaryLanguageOption("de", "German"),
-        DictionaryLanguageOption("es", "Spanish"),
-        DictionaryLanguageOption("fr", "French"),
-        DictionaryLanguageOption("it", "Italian"),
-        DictionaryLanguageOption("ru", "Russian"),
+        DictionaryLanguageOption("ja", R.string.dictionary_language_japanese),
+        DictionaryLanguageOption("en", R.string.dictionary_language_english),
+        DictionaryLanguageOption("zh", R.string.dictionary_language_chinese),
+        DictionaryLanguageOption("ko", R.string.dictionary_language_korean),
+        DictionaryLanguageOption("ar", R.string.dictionary_language_arabic),
+        DictionaryLanguageOption("de", R.string.dictionary_language_german),
+        DictionaryLanguageOption("es", R.string.dictionary_language_spanish),
+        DictionaryLanguageOption("fr", R.string.dictionary_language_french),
+        DictionaryLanguageOption("it", R.string.dictionary_language_italian),
+        DictionaryLanguageOption("ru", R.string.dictionary_language_russian),
     )
 
     private val registry = mapOf(

@@ -243,7 +243,7 @@ class DictionaryEngine private constructor(private val context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Dictionary lookup failed.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.dictionary_lookup_failed_toast), Toast.LENGTH_SHORT).show()
             }
             emptyList()
         }

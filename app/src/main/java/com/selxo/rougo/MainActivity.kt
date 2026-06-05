@@ -68,7 +68,7 @@ class MainActivity : ComponentActivity() {
                 t.printStackTrace()
                 CrashReporter.recordHandled(applicationContext, "Media tools startup", t)
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Media tools initialization failed.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, getString(R.string.media_tools_initialization_failed_toast), Toast.LENGTH_LONG).show()
                 }
             }
         }

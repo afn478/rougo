@@ -79,7 +79,7 @@ private fun parseGithubTimestamp(value: String): Long {
 fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
     val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
     val downloadsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: run {
-        Toast.makeText(context, "Update storage is unavailable.", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, context.getString(R.string.update_storage_unavailable_toast), Toast.LENGTH_LONG).show()
         return
     }
     cleanupOldUpdateApks(downloadsDir)
@@ -88,7 +88,7 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
     try { destinationFile.delete() } catch (e: Exception) {}
     val request = DownloadManager.Request(Uri.parse(downloadUrl))
         .setTitle(fileName)
-        .setDescription("Downloading Rougo update...")
+        .setDescription(context.getString(R.string.update_download_description))
         .setMimeType("application/vnd.android.package-archive")
         .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
@@ -105,7 +105,7 @@ fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
                 if (isDownloadSuccessful(downloadManager, downloadId) && downloadedFile.exists() && downloadedFile.length() > 0L) {
                     installApk(context, downloadedFile)
                 } else {
-                    Toast.makeText(context, "Update download failed.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, context.getString(R.string.update_download_failed_toast), Toast.LENGTH_LONG).show()
                 }
                 try { context.unregisterReceiver(this) } catch (e: Exception) {}
             }
