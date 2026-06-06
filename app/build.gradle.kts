@@ -104,6 +104,10 @@ dependencies {
     // LibVLC for Android (Handles Video/Audio Playback safely)
     implementation(libs.libvlc.all)
 
+    // PipePipe/NewPipe extractor backend for supported web media services
+    implementation(libs.pipepipe.extractor)
+    implementation(libs.okhttp)
+
     // YoutubeDL-Android (For downloading/streaming functionality)
     implementation(libs.youtubedl.library)
     implementation(libs.youtubedl.ffmpeg)

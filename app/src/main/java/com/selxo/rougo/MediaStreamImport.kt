@@ -232,41 +232,10 @@ private fun titleFromDownloadedFile(context: Context, file: File, fileId: String
     return cleanOptionalYtdlpTitle(context, raw, sourceUrl)
 }
 internal fun fetchFastYoutubeStream(context: Context, url: String, preferredResolution: String): FastYoutubeStream? {
-    if (!isYoutubeUrl(url)) return null
-    check(ensureMediaToolsReady(context)) { "Media tools are unavailable." }
-    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url)
-    request.addOption("-f", fastYoutubeFormatSelector(preferredResolution))
-    request.addOption("--print", "%(title)s|||%(format_id)s|||%(url)s|||%(vcodec)s|||%(http_headers)j")
-
-    return try {
-        val response = YoutubeDL.getInstance().execute(request, null, false)
-        val outLine = response.out.lineSequence().lastOrNull { it.contains("|||") } ?: return null
-        val parts = outLine.split("|||")
-        if (parts.size >= 5) {
-            val title = parts[0].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
-                ?: context.getString(R.string.media_source_youtube_stream)
-            val formatId = parts[1].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
-            val streamUrl = parts[2].takeIf { it.isNotBlank() && it != "NA" && it != "null" } ?: return null
-            val vcodec = parts[3].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
-            val headersJson = parts[4].takeIf { it.isNotBlank() && it != "NA" && it != "null" }
-            val headers = headersJson?.let {
-                runCatching { parseStreamHttpHeaders(JSONObject(it)) }.getOrNull()
-            }
-            FastYoutubeStream(
-                title = title,
-                streamUrl = streamUrl,
-                formatId = formatId,
-                isVideo = vcodec != "none",
-                httpUserAgent = headers?.first,
-                httpReferer = headers?.second
-            )
-        } else {
-            null
-        }
-    } catch (t: Throwable) {
-        CrashReporter.recordHandled(context, "Fast YouTube stream", t)
-        null
-    }
+    if (!isPipePipeSupportedUrl(url)) return null
+    return runCatching { fetchPipePipeFastStream(context, url, preferredResolution) }
+        .onFailure { CrashReporter.recordHandled(context, "Fast PipePipe stream", it) }
+        .getOrNull()
 }
 internal fun createFastYoutubeLibraryItem(stream: FastYoutubeStream, sourceUrl: String): LibraryItem {
     return LibraryItem(
@@ -369,28 +338,7 @@ internal fun stopYoutubeWebViewPlayback(webView: WebView?) {
     )
 }
 internal fun fetchYoutubeSetupData(context: Context, url: String): YoutubeSetupData {
-    val json = fetchYoutubeInfoJson(context, url)
-    val headers = parseStreamHttpHeaders(json)
-    val isYoutubeSource = isYoutubeUrl(url)
-    val title = cleanYtdlpTitle(
-        context,
-        firstCleanMetadataValue(
-            json.optString("fulltitle"),
-            json.optString("title"),
-            json.optString("alt_title")
-        ),
-        url
-    ) ?: sourceDefaultTitle(context, url)
-
-    return YoutubeSetupData(
-        title = title,
-        fallbackUrl = json.optString("url").takeIf { it.isNotBlank() },
-        formats = parseYoutubeFormats(json),
-        subtitleChoices = if (isYoutubeSource) parseYoutubeSubtitleChoices(json) else emptyList(),
-        thumbnailUrl = bestThumbnailUrl(json),
-        httpUserAgent = headers.first,
-        httpReferer = headers.second
-    )
+    return fetchPipePipeSetupData(context, url)
 }
 private fun parseStreamHttpHeaders(json: JSONObject): Pair<String?, String?> {
     val headers = json.optJSONObject("http_headers")
@@ -413,7 +361,7 @@ internal suspend fun createYoutubeLibraryItem(
     val coverArtPath = setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
     LibraryItem(
         id = itemId,
-        title = setupData?.title ?: context.getString(R.string.media_source_youtube_stream),
+        title = setupData?.title ?: sourceDefaultTitle(context, sourceUrl),
         mediaUri = sourceUrl,
         subtitleUri = subtitleUri,
         progress = 0L,
@@ -825,60 +773,12 @@ internal fun selectPreferredYoutubeFormat(
     }
 }
 internal fun resolveYoutubeStreamUrl(context: Context, url: String, formatId: String?): String? {
-    if (!ensureMediaToolsReady(context)) return null
-    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url)
-    if (formatId != null) {
-        request.addOption("-f", formatId)
-    } else {
-        request.addOption("-f", "best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best")
-    }
-    request.addOption("--print", "url")
-    return try {
-        val response = YoutubeDL.getInstance().execute(request, null, false)
-        response.out.lineSequence().firstOrNull { it.trim().startsWith("http") }?.trim()
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
-    }
-}
-private fun fetchYoutubeInfoJson(context: Context, url: String): JSONObject {
-    check(ensureMediaToolsReady(context)) { "Media tools are unavailable." }
-    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url)
-    request.addOption("--dump-json")
-
-    val response = YoutubeDL.getInstance().execute(request, null, false)
-    return JSONObject(extractDumpedJson(response.out))
+    return resolvePipePipeStreamUrl(context, url, formatId)
 }
 internal fun downloadYoutubeSubtitle(context: Context, url: String, languageCode: String, isAutoGenerated: Boolean): String? {
-    if (!isYoutubeUrl(url)) return null
-    if (!ensureMediaToolsReady(context)) return null
-    val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoSubs")
-    destDir.mkdirs()
-
-    val fileId = UUID.randomUUID().toString()
-    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url)
-    request.addOption(if (isAutoGenerated) "--write-auto-subs" else "--write-subs")
-    request.addOption("--sub-langs", languageCode)
-    request.addOption("--sub-format", "vtt/srt/best")
-    request.addOption("--convert-subs", "srt")
-    request.addOption("-o", "${destDir.absolutePath}/$fileId.%(ext)s")
-
-    return try {
-        YoutubeDL.getInstance().execute(request, fileId, false)
-        val subtitleUri = findDownloadedSubtitle(destDir, fileId)?.let { Uri.fromFile(it).toString() }
-        if (subtitleUri == null && !isAutoGenerated) {
-            downloadYoutubeSubtitle(context, url, languageCode, true)
-        } else {
-            subtitleUri
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        if (!isAutoGenerated) {
-            downloadYoutubeSubtitle(context, url, languageCode, true)
-        } else {
-            null
-        }
-    }
+    if (!isPipePipeSupportedUrl(url)) return null
+    return downloadPipePipeSubtitle(context, url, languageCode, isAutoGenerated)
+        ?: if (!isAutoGenerated) downloadPipePipeSubtitle(context, url, languageCode, true) else null
 }
 internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, existingItem: LibraryItem? = null): LibraryItem? {
     val itemId = existingItem?.id ?: UUID.randomUUID().toString()

@@ -93,6 +93,13 @@ class LibraryManager(context: Context) {
         prefs.edit { putString("items", itemsToJson(current).toString()) }
     }
 
+    fun saveItems(items: List<LibraryItem>) {
+        if (items.isEmpty()) return
+        val incomingIds = items.map { it.id }.toSet()
+        val current = getItems().filterNot { it.id in incomingIds }
+        prefs.edit { putString("items", itemsToJson(items + current).toString()) }
+    }
+
     fun deleteItem(id: String) {
         val items = getItems()
         items.filter { it.id == id || it.parentId == id }.forEach { item ->
