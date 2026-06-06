@@ -15,7 +15,6 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
 import android.util.Size
 import android.webkit.JavascriptInterface
@@ -30,20 +29,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.ffmpeg.execute
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 
 internal data class YoutubeSubtitleChoice(
     val label: String,
@@ -79,37 +72,9 @@ internal data class FastYoutubeStream(
     val httpUserAgent: String? = null,
     val httpReferer: String? = null
 )
-private val mediaToolsInitLock = Any()
-@Volatile
-private var mediaToolsInitialized = false
-@Volatile
-private var mediaToolsInitFailureLogged = false
 private const val DOWNLOAD_NOTIFICATION_PREFS = "rougo_download_notifications"
 private const val PREF_COMPLETED_DOWNLOAD_NOTIFICATION_IDS = "completed_download_notification_ids"
 private val completedDownloadNotificationLock = Any()
-internal fun ensureMediaToolsReady(context: Context): Boolean {
-    if (mediaToolsInitialized) return true
-    val appContext = context.applicationContext
-    return synchronized(mediaToolsInitLock) {
-        if (mediaToolsInitialized) {
-            true
-        } else {
-            try {
-                YoutubeDL.getInstance().init(appContext)
-                FFmpeg.getInstance().init(appContext)
-                mediaToolsInitialized = true
-                true
-            } catch (t: Throwable) {
-                t.printStackTrace()
-                if (!mediaToolsInitFailureLogged) {
-                    CrashReporter.recordHandled(appContext, "Media tools init", t)
-                    mediaToolsInitFailureLogged = true
-                }
-                false
-            }
-        }
-    }
-}
 internal fun isYoutubeUrl(url: String): Boolean {
     val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
     return host.contains("youtube.com") || host.contains("youtu.be")
@@ -166,58 +131,16 @@ internal fun streamSourceLabel(context: Context, url: String?): String {
             .ifBlank { context.getString(R.string.media_source_stream) }
     }
 }
-private fun addFastYoutubeOptions(context: Context, request: YoutubeDLRequest, sourceUrl: String, skipDownload: Boolean = true): YoutubeDLRequest {
-    val cacheDir = File(context.cacheDir, "yt-dlp-cache").apply { mkdirs() }
-    val configured = request
-        .addOption("--no-playlist")
-        .addOption("--no-warnings")
-        .addOption("--no-progress")
-        .addOption("--force-ipv4")
-        .addOption("--cache-dir", cacheDir.absolutePath)
-
-    if (skipDownload) configured.addOption("--skip-download")
-
-    if (isYoutubeUrl(sourceUrl)) {
-        // iOS/Android clients bypass the Web JS challenge.
-        // Skipping webpage, configs, and js stops yt-dlp from downloading heavy HTML/JS,
-        // saving several more seconds by directly hitting the lightweight mobile API!
-        configured.addOption("--extractor-args", "youtube:player_client=ios,android;player_skip=webpage,configs,js")
-    }
-
-    return configured
-}
-private fun fastYoutubeFormatSelector(preferredResolution: String): String {
-    return when (preferredResolution) {
-        YOUTUBE_RESOLUTION_AUDIO -> "bestaudio[ext=m4a]/bestaudio/best"
-        YOUTUBE_RESOLUTION_HIGHEST ->
-            "best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best"
-        else -> {
-            val targetHeight = preferredResolution.toIntOrNull()?.coerceAtLeast(144)
-            if (targetHeight == null) {
-                "best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best"
-            } else {
-                "best[height<=$targetHeight][vcodec!=none][acodec!=none][ext=mp4]/" +
-                    "best[height<=$targetHeight][vcodec!=none][acodec!=none]/" +
-                    "best[vcodec!=none][acodec!=none]/best"
-            }
-        }
-    }
-}
-private fun cleanYtdlpPrintedValue(value: String?): String? {
-    return value
-        ?.trim()
-        ?.takeIf { it.isNotBlank() && it != "NA" && it != "null" }
-}
 private fun sourceDefaultTitle(context: Context, url: String): String =
     context.getString(R.string.media_source_default_title, streamSourceLabel(context, url))
-private fun cleanYtdlpTitle(context: Context, value: String?, sourceUrl: String): String? {
-    val cleaned = cleanYtdlpPrintedValue(value)
+private fun cleanImportedTitle(context: Context, value: String?, sourceUrl: String): String? {
+    val cleaned = cleanMetadataValue(value)
         ?.replace(Regex("\\s+"), " ")
         ?.takeIf { !looksLikeGeneratedFileId(it) }
     return cleaned ?: sourceDefaultTitle(context, sourceUrl)
 }
-private fun cleanOptionalYtdlpTitle(context: Context, value: String?, sourceUrl: String): String? {
-    return cleanYtdlpTitle(context, value, sourceUrl)
+private fun cleanOptionalImportedTitle(context: Context, value: String?, sourceUrl: String): String? {
+    return cleanImportedTitle(context, value, sourceUrl)
         ?.takeIf { it != sourceDefaultTitle(context, sourceUrl) }
 }
 internal fun looksLikeGeneratedFileId(value: String): Boolean {
@@ -229,7 +152,7 @@ private fun titleFromDownloadedFile(context: Context, file: File, fileId: String
         .removePrefix(fileId)
         .trimStart('.', '-', '_', ' ')
         .replace(Regex("\\s+"), " ")
-    return cleanOptionalYtdlpTitle(context, raw, sourceUrl)
+    return cleanOptionalImportedTitle(context, raw, sourceUrl)
 }
 internal fun fetchFastYoutubeStream(context: Context, url: String, preferredResolution: String): FastYoutubeStream? {
     if (!isPipePipeSupportedUrl(url)) return null
@@ -340,16 +263,6 @@ internal fun stopYoutubeWebViewPlayback(webView: WebView?) {
 internal fun fetchYoutubeSetupData(context: Context, url: String): YoutubeSetupData {
     return fetchPipePipeSetupData(context, url)
 }
-private fun parseStreamHttpHeaders(json: JSONObject): Pair<String?, String?> {
-    val headers = json.optJSONObject("http_headers")
-    val userAgent = headers?.optCleanString("User-Agent")
-        ?: headers?.optCleanString("user-agent")
-        ?: json.optCleanString("user_agent")
-    val referer = headers?.optCleanString("Referer")
-        ?: headers?.optCleanString("referer")
-        ?: headers?.optCleanString("Referrer")
-    return userAgent to referer
-}
 internal suspend fun createYoutubeLibraryItem(
     context: Context,
     setupData: YoutubeSetupData?,
@@ -373,24 +286,6 @@ internal suspend fun createYoutubeLibraryItem(
         httpUserAgent = setupData?.httpUserAgent,
         httpReferer = setupData?.httpReferer
     )
-}
-private fun bestThumbnailUrl(json: JSONObject): String? {
-    val thumbnails = json.optJSONArray("thumbnails")
-    if (thumbnails != null && thumbnails.length() > 0) {
-        var bestUrl: String? = null
-        var bestArea = -1
-        for (i in 0 until thumbnails.length()) {
-            val item = thumbnails.optJSONObject(i) ?: continue
-            val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
-            val area = item.optInt("width", 0) * item.optInt("height", 0)
-            if (area >= bestArea) {
-                bestUrl = url
-                bestArea = area
-            }
-        }
-        if (!bestUrl.isNullOrBlank()) return bestUrl
-    }
-    return json.optString("thumbnail").takeIf { it.isNotBlank() }
 }
 internal fun downloadRemoteCover(context: Context, itemId: String, url: String): String? {
     return try {
@@ -680,25 +575,11 @@ private fun showDownloadFailedNotification(context: Context, key: String, title:
         setProgress(0, 0, false)
     }
 }
-private fun downloadProgressPercent(progress: Float): Int? {
-    if (progress.isNaN() || progress.isInfinite() || progress < 0f || progress > 100f) return null
-    return progress.roundToInt().coerceIn(0, 100)
-}
-private fun downloadProgressDetail(context: Context, progressPercent: Int?, etaSeconds: Long, line: String): String {
+private fun downloadProgressDetail(context: Context, progressPercent: Int?): String {
     if (progressPercent == null) {
-        return line.takeIf { it.isNotBlank() }?.take(80) ?: context.getString(R.string.download_progress_downloading)
+        return context.getString(R.string.download_progress_downloading)
     }
-    val etaText = when {
-        etaSeconds <= 0L -> null
-        etaSeconds < 60L -> context.getString(R.string.download_eta_seconds, etaSeconds)
-        etaSeconds < 3600L -> context.getString(R.string.download_eta_minutes, etaSeconds / 60L)
-        else -> context.getString(R.string.download_eta_hours_minutes, etaSeconds / 3600L, (etaSeconds % 3600L) / 60L)
-    }
-    return if (etaText != null) {
-        context.getString(R.string.download_progress_detail, progressPercent, etaText)
-    } else {
-        context.getString(R.string.download_progress_percent_only, progressPercent)
-    }
+    return context.getString(R.string.download_progress_percent_only, progressPercent)
 }
 internal fun selectPreferredYoutubeSubtitle(choices: List<YoutubeSubtitleChoice>, preferredLanguage: String): YoutubeSubtitleChoice? {
     if (choices.isEmpty()) return null
@@ -780,6 +661,139 @@ internal fun downloadYoutubeSubtitle(context: Context, url: String, languageCode
     return downloadPipePipeSubtitle(context, url, languageCode, isAutoGenerated)
         ?: if (!isAutoGenerated) downloadPipePipeSubtitle(context, url, languageCode, true) else null
 }
+private data class MediaDownloadSelection(
+    val setupData: YoutubeSetupData,
+    val format: YoutubeStreamFormat,
+    val mediaUrl: String,
+    val outputExtension: String,
+    val requiresFfmpeg: Boolean
+)
+
+private fun selectMediaDownload(context: Context, url: String): MediaDownloadSelection? {
+    if (!isPipePipeSupportedUrl(url)) return null
+    val setupData = fetchYoutubeSetupData(context, url)
+    val selected = selectPreferredYoutubeFormat(setupData.formats, DEFAULT_YOUTUBE_RESOLUTION)
+        ?: setupData.formats.firstOrNull { it.playbackUrl() != null }
+        ?: return null
+    val mediaUrl = selected.playbackUrl() ?: setupData.fallbackUrl ?: return null
+    return MediaDownloadSelection(
+        setupData = setupData,
+        format = selected,
+        mediaUrl = mediaUrl,
+        outputExtension = selected.downloadOutputExtension(),
+        requiresFfmpeg = !selected.isDirectHttpDownload()
+    )
+}
+
+private fun YoutubeStreamFormat.isDirectHttpDownload(): Boolean {
+    val directUrl = url?.takeIf { it.isNotBlank() } ?: return false
+    val protocolValue = protocol?.lowercase(Locale.US).orEmpty()
+    val extValue = ext?.lowercase(Locale.US).orEmpty()
+    return directUrl.startsWith("http", ignoreCase = true) &&
+        !protocolValue.contains("hls") &&
+        !protocolValue.contains("dash") &&
+        !protocolValue.contains("m3u8") &&
+        extValue != "m3u8" &&
+        extValue != "mpd"
+}
+
+private fun YoutubeStreamFormat.downloadOutputExtension(): String {
+    val extValue = ext?.lowercase(Locale.US)?.takeIf { it.matches(Regex("[a-z0-9]{2,5}")) }
+    if (extValue != null && extValue !in setOf("m3u8", "mpd")) return extValue
+    return if (vcodec == "none") "m4a" else "mp4"
+}
+
+private fun safeDownloadFileComponent(value: String): String {
+    return cleanMetadataValue(value)
+        ?.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        ?.replace(Regex("\\s+"), " ")
+        ?.trim('.', ' ')
+        ?.take(80)
+        ?.takeIf { it.isNotBlank() }
+        ?: "download"
+}
+
+private fun downloadExtractedStreamDirectly(
+    context: Context,
+    selection: MediaDownloadSelection,
+    outputFile: File,
+    onProgress: (Int?) -> Unit
+): Boolean {
+    val connection = (URL(selection.mediaUrl).openConnection() as HttpURLConnection).apply {
+        connectTimeout = 15000
+        readTimeout = 30000
+        instanceFollowRedirects = true
+        setRequestProperty("User-Agent", selection.setupData.httpUserAgent ?: "Mozilla/5.0")
+        selection.setupData.httpReferer?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Referer", it) }
+    }
+
+    return try {
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) throw IOException("Download request failed: HTTP $responseCode")
+
+        val totalBytes = connection.contentLengthLong.takeIf { it > 0L }
+        var downloadedBytes = 0L
+        var lastProgressPercent = -1
+        var lastProgressNotificationAt = 0L
+
+        connection.inputStream.use { input ->
+            outputFile.outputStream().use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    output.write(buffer, 0, read)
+                    downloadedBytes += read
+
+                    val progressPercent = totalBytes
+                        ?.let { ((downloadedBytes * 100L) / it).toInt().coerceIn(0, 100) }
+                    val now = System.currentTimeMillis()
+                    val progressChanged = progressPercent != null && progressPercent != lastProgressPercent
+                    if (progressChanged || now - lastProgressNotificationAt >= 1000L) {
+                        lastProgressNotificationAt = now
+                        if (progressPercent != null) lastProgressPercent = progressPercent
+                        onProgress(progressPercent)
+                    }
+                }
+            }
+        }
+
+        outputFile.length() > 0L
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun downloadExtractedStreamWithFfmpeg(
+    context: Context,
+    selection: MediaDownloadSelection,
+    outputFile: File
+): Boolean {
+    val cmd = mutableListOf("-y", "-hide_banner", "-loglevel", "error", "-nostdin")
+    selection.setupData.httpUserAgent?.takeIf { it.isNotBlank() }?.let {
+        cmd.add("-user_agent")
+        cmd.add(it)
+    }
+    selection.setupData.httpReferer?.takeIf { it.isNotBlank() }?.let {
+        cmd.add("-headers")
+        cmd.add("Referer: $it\r\n")
+    }
+    cmd.add("-i")
+    cmd.add(selection.mediaUrl)
+    if (selection.outputExtension == "mp4") {
+        cmd.add("-c")
+        cmd.add("copy")
+        cmd.add("-movflags")
+        cmd.add("+faststart")
+    } else {
+        cmd.add("-c")
+        cmd.add("copy")
+    }
+    cmd.add(outputFile.absolutePath)
+
+    return executeFfmpeg(context, cmd.toTypedArray()) == 0 && outputFile.length() > 0L
+}
+
 internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, existingItem: LibraryItem? = null): LibraryItem? {
     val itemId = existingItem?.id ?: UUID.randomUUID().toString()
     val fileId = itemId.replace(Regex("[^A-Za-z0-9_-]"), "_")
@@ -789,55 +803,71 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
 
     showDownloadProgressNotification(context, notificationKey, initialTitle, null, context.getString(R.string.download_progress_preparing))
 
-    if (!ensureMediaToolsReady(context)) {
+    val selection = runCatching { selectMediaDownload(context, url) }
+        .onFailure { CrashReporter.recordHandled(context, "Prepare PipePipe download", it) }
+        .getOrNull()
+    if (selection == null) {
         showDownloadFailedNotification(context, notificationKey, initialTitle)
         return null
     }
 
-    val setupData = runCatching { fetchYoutubeSetupData(context, url) }.getOrNull()
-    val notificationTitle = cleanOptionalYtdlpTitle(context, setupData?.title, url)
-        ?: initialTitle
+    val setupData = selection.setupData
+    val notificationTitle = cleanOptionalImportedTitle(context, setupData.title, url) ?: initialTitle
     val destDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "RougoDownloads").apply { mkdirs() }
-
-    val request = addFastYoutubeOptions(context, YoutubeDLRequest(url), url, skipDownload = false)
-    request.addOption("-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best")
-    request.addOption("--merge-output-format", "mp4")
-    request.addOption("-o", "${destDir.absolutePath}/$fileId.%(title)s.%(ext)s")
+    val safeTitle = safeDownloadFileComponent(notificationTitle)
+    val tempFile = File(destDir, "$fileId.$safeTitle.${selection.outputExtension}.download")
+    val downloadedFile = File(destDir, "$fileId.$safeTitle.${selection.outputExtension}")
 
     return try {
-        var lastProgressNotificationAt = 0L
-        var lastProgressPercent = -1
         showDownloadProgressNotification(context, notificationKey, notificationTitle, null, context.getString(R.string.download_progress_starting))
 
-        YoutubeDL.getInstance().execute(request, fileId, false) { progress, etaSeconds, line ->
-            val progressPercent = downloadProgressPercent(progress)
-            val now = SystemClock.elapsedRealtime()
-            val progressChanged = progressPercent != null && progressPercent != lastProgressPercent
-            if (progressChanged || now - lastProgressNotificationAt >= 1000L) {
-                lastProgressNotificationAt = now
-                if (progressPercent != null) lastProgressPercent = progressPercent
-                showDownloadProgressNotification(
-                    context = context,
-                    key = notificationKey,
-                    title = notificationTitle,
-                    progressPercent = progressPercent,
-                    detail = downloadProgressDetail(context, progressPercent, etaSeconds, line)
-                )
-            }
+        try { tempFile.delete() } catch (e: Exception) {}
+        try { downloadedFile.delete() } catch (e: Exception) {}
+
+        val downloadSucceeded = if (selection.requiresFfmpeg) {
+            downloadExtractedStreamWithFfmpeg(
+                context = context,
+                selection = selection,
+                outputFile = tempFile
+            )
+        } else {
+            downloadExtractedStreamDirectly(
+                context = context,
+                selection = selection,
+                outputFile = tempFile,
+                onProgress = { progressPercent ->
+                    showDownloadProgressNotification(
+                        context = context,
+                        key = notificationKey,
+                        title = notificationTitle,
+                        progressPercent = progressPercent,
+                        detail = downloadProgressDetail(context, progressPercent)
+                    )
+                }
+            )
+        }
+
+        if (!downloadSucceeded || tempFile.length() <= 0L) {
+            showDownloadFailedNotification(context, notificationKey, notificationTitle)
+            try { tempFile.delete() } catch (e: Exception) {}
+            return null
+        }
+
+        if (!tempFile.renameTo(downloadedFile)) {
+            tempFile.copyTo(downloadedFile, overwrite = true)
+            try { tempFile.delete() } catch (e: Exception) {}
         }
 
         showDownloadProgressNotification(context, notificationKey, notificationTitle, 100, context.getString(R.string.download_progress_finalizing))
-        val downloadedFile = destDir.listFiles()
-            ?.filter { it.isFile && it.name.startsWith(fileId) && it.length() > 0L && !it.name.endsWith(".part") }
-            ?.maxByOrNull { it.lastModified() }
-        if (downloadedFile == null) {
+        if (!downloadedFile.exists() || downloadedFile.length() <= 0L) {
             showDownloadFailedNotification(context, notificationKey, notificationTitle)
             return null
         }
 
         val mediaUri = Uri.fromFile(downloadedFile)
-        val metadata = extractMediaMetadata(context, mediaUri, itemId, isVideo = true)
-        val fallbackTitle = cleanOptionalYtdlpTitle(context, setupData?.title, url)
+        val isVideo = selection.format.vcodec != "none"
+        val metadata = extractMediaMetadata(context, mediaUri, itemId, isVideo = isVideo)
+        val fallbackTitle = cleanOptionalImportedTitle(context, setupData.title, url)
             ?: existingItem?.title?.takeIf { !looksLikeGeneratedFileId(it) }
             ?: titleFromDownloadedFile(context, downloadedFile, fileId, url)
             ?: sourceDefaultTitle(context, url)
@@ -848,15 +878,15 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
             subtitleUri = existingItem?.subtitleUri,
             progress = existingItem?.progress ?: 0L,
             duration = metadata.durationMs ?: 0L,
-            isVideo = true,
+            isVideo = isVideo,
             sourceUrl = existingItem?.sourceUrl ?: url,
-            formatId = existingItem?.formatId,
+            formatId = selection.format.formatId ?: existingItem?.formatId,
             recordings = existingItem?.recordings ?: emptyList(),
             coverArtPath = metadata.coverArtPath
-                ?: setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
+                ?: setupData.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
                 ?: existingItem?.coverArtPath,
-            httpUserAgent = existingItem?.httpUserAgent ?: setupData?.httpUserAgent,
-            httpReferer = existingItem?.httpReferer ?: setupData?.httpReferer
+            httpUserAgent = existingItem?.httpUserAgent ?: setupData.httpUserAgent,
+            httpReferer = existingItem?.httpReferer ?: setupData.httpReferer
         )
         val mergedItem = mergeMetadataIntoItem(baseItem, metadata, fallbackTitle)
         showDownloadCompleteNotification(context, notificationKey, mergedItem.title)
@@ -871,97 +901,11 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
             cancelled = t is InterruptedException || t::class.java.simpleName.contains("Canceled", ignoreCase = true)
         )
         null
-    }
-}
-private fun findDownloadedSubtitle(destDir: File, fileId: String): File? {
-    return destDir.listFiles()
-        ?.filter {
-            val ext = it.extension.lowercase(Locale.US)
-            it.name.startsWith(fileId) && it.length() > 0L && (ext == "srt" || ext == "vtt" || ext == "ass")
-        }
-        ?.maxWithOrNull(compareBy<File> {
-            when (it.extension.lowercase(Locale.US)) {
-                "srt" -> 3
-                "vtt" -> 2
-                else -> 1
-            }
-        }.thenBy { it.lastModified() })
-}
-private fun extractDumpedJson(output: String): String {
-    val trimmed = output.trim()
-    if (trimmed.startsWith("{")) return trimmed
-
-    return output.lineSequence()
-        .map { it.trim() }
-        .firstOrNull { it.startsWith("{") && it.endsWith("}") }
-        ?: trimmed
-}
-private fun parseYoutubeSubtitleChoices(json: JSONObject): List<YoutubeSubtitleChoice> {
-    val choices = linkedMapOf<String, YoutubeSubtitleChoice>()
-
-    fun addChoices(groupName: String, isAutoGenerated: Boolean) {
-        val group = json.optJSONObject(groupName) ?: return
-        val keys = group.keys()
-        while (keys.hasNext()) {
-            val languageCode = keys.next()
-            if (languageCode == "live_chat") continue
-            val tracks = group.optJSONArray(languageCode)
-            if (tracks == null || tracks.length() == 0) continue
-
-            val firstTrack = tracks.optJSONObject(0)
-            val trackName = firstTrack?.optString("name").orEmpty().takeIf { it.isNotBlank() }
-            val localeName = Locale.forLanguageTag(languageCode).displayName.takeIf { it.isNotBlank() && it != languageCode }
-            val languageName = trackName ?: localeName ?: languageCode
-            val label = if (isAutoGenerated) {
-                "$languageName ($languageCode, Auto)"
-            } else {
-                "$languageName ($languageCode)"
-            }
-            choices["$languageCode:$isAutoGenerated"] = YoutubeSubtitleChoice(label, languageCode, isAutoGenerated)
+    } finally {
+        if (tempFile.exists()) {
+            try { tempFile.delete() } catch (e: Exception) {}
         }
     }
-
-    addChoices("subtitles", false)
-    addChoices("automatic_captions", true)
-
-    fun languagePriority(choice: YoutubeSubtitleChoice): Int {
-        val code = choice.languageCode.lowercase(Locale.US)
-        return when {
-            code == "ja" || code.startsWith("ja-") -> 0
-            code == "en" || code.startsWith("en-") -> 1
-            else -> 2
-        }
-    }
-
-    return choices.values.sortedWith(
-        compareBy<YoutubeSubtitleChoice> { languagePriority(it) }
-            .thenBy { it.isAutoGenerated }
-            .thenBy { it.label.lowercase(Locale.US) }
-    )
-}
-private fun parseYoutubeFormats(json: JSONObject): List<YoutubeStreamFormat> {
-    val formatsJson = json.optJSONArray("formats") ?: return emptyList()
-    val formats = mutableListOf<YoutubeStreamFormat>()
-
-    for (i in 0 until formatsJson.length()) {
-        val format = formatsJson.optJSONObject(i) ?: continue
-        formats.add(
-            YoutubeStreamFormat(
-                formatId = format.optString("format_id").takeIf { it.isNotBlank() },
-                formatNote = format.optString("format_note").takeIf { it.isNotBlank() },
-                ext = format.optString("ext").takeIf { it.isNotBlank() },
-                vcodec = format.optString("vcodec").takeIf { it.isNotBlank() },
-                acodec = format.optString("acodec").takeIf { it.isNotBlank() },
-                height = format.optInt("height", 0),
-                tbr = format.optDouble("tbr", 0.0).toInt(),
-                url = format.optString("url").takeIf { it.isNotBlank() },
-                manifestUrl = format.optString("manifest_url").takeIf { it.isNotBlank() },
-                protocol = format.optString("protocol").takeIf { it.isNotBlank() }
-            )
-        )
-    }
-
-    return formats
 }
 internal fun initialPlayableMediaUri(item: LibraryItem): String? {
     val mediaUri = item.mediaUri.trim()
@@ -970,17 +914,6 @@ internal fun initialPlayableMediaUri(item: LibraryItem): String? {
     if (item.hasDownloadedLocalCopy()) return mediaUri
     if (mediaUri != item.sourceUrl.trim()) return mediaUri
     return null
-}
-private fun YoutubeStreamFormat.bestPlaybackUrl(): String? {
-    val manifest = manifestUrl?.takeIf { it.isNotBlank() }
-    val directUrl = url?.takeIf { it.isNotBlank() }
-    val protocolValue = protocol?.lowercase(Locale.US).orEmpty()
-    return when {
-        protocolValue.contains("m3u8") -> directUrl ?: manifest
-        protocolValue.contains("dash") -> manifest ?: directUrl
-        isVlcFriendlyVideoFormat() || isVlcFriendlyAudioFormat() -> directUrl ?: manifest
-        else -> manifest ?: directUrl
-    }
 }
 internal fun YoutubeStreamFormat.isVlcFriendlyVideoFormat(): Boolean {
     if (vcodec == "none" || acodec == "none") return false

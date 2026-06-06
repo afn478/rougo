@@ -10,8 +10,6 @@ import android.os.ParcelFileDescriptor
 import android.util.Size
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.filled.*
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.ffmpeg.execute
 import java.io.File
 
 internal fun LibraryItem.persistableMediaUri(actualMediaUri: String?): String {
@@ -146,7 +144,7 @@ private fun cacheCoverBitmap(context: Context, itemId: String, bitmap: Bitmap): 
     }
 }
 private fun extractAttachedPictureWithFfmpeg(context: Context, itemId: String, uri: Uri): String? {
-    if (!ensureMediaToolsReady(context)) return null
+    if (!ensureFfmpegReady(context)) return null
     val input = resolveFfmpegInput(context, uri, preferFileDescriptor = false) ?: return null
     val coverDir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir, "MetadataCovers")
         .apply { mkdirs() }
@@ -155,7 +153,8 @@ private fun extractAttachedPictureWithFfmpeg(context: Context, itemId: String, u
 
     return try {
         try { tempCover.delete() } catch (e: Exception) {}
-        val rc = FFmpeg.getInstance().execute(
+        val rc = executeFfmpeg(
+            context,
             arrayOf(
                 "-y",
                 "-hide_banner",

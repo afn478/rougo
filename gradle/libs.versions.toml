@@ -9,7 +9,7 @@ activityCompose = "1.13.0"
 kotlin = "2.3.21"
 composeBom = "2026.05.01"
 libvlc = "3.6.0"
-youtubedlAndroid = "0.18.1"
+ffmpegBundle = "0.18.1"
 pipePipeExtractor = "3b2af63f1f53"
 okhttp = "4.10.0"
 
@@ -29,8 +29,7 @@ androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-
 androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 libvlc-all = { group = "org.videolan.android", name = "libvlc-all", version.ref = "libvlc" }
-youtubedl-library = { group = "io.github.junkfood02.youtubedl-android", name = "library", version.ref = "youtubedlAndroid" }
-youtubedl-ffmpeg = { group = "io.github.junkfood02.youtubedl-android", name = "ffmpeg", version.ref = "youtubedlAndroid" }
+android-ffmpeg-bundle = { group = "io.github.junkfood02.youtubedl-android", name = "ffmpeg", version.ref = "ffmpegBundle" }
 pipepipe-extractor = { group = "com.github.InfinityLoop1308.PipePipeExtractor", name = "extractor", version.ref = "pipePipeExtractor" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 

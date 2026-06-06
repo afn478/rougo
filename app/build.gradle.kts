@@ -48,7 +48,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += listOf("**/libffmpeg.zip.so", "**/libpython.zip.so")
+            keepDebugSymbols += listOf("**/libffmpeg.zip.so")
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -108,9 +108,8 @@ dependencies {
     implementation(libs.pipepipe.extractor)
     implementation(libs.okhttp)
 
-    // YoutubeDL-Android (For downloading/streaming functionality)
-    implementation(libs.youtubedl.library)
-    implementation(libs.youtubedl.ffmpeg)
+    // FFmpeg bundle used only for local waveform extraction and PipePipe-resolved manifest downloads.
+    implementation(libs.android.ffmpeg.bundle)
     implementation(project(":hoshidicts"))
 
 }

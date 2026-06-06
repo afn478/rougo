@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Size
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -22,11 +21,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
-import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private var sharedUrlState = mutableStateOf<String?>(null)
@@ -46,30 +42,6 @@ class MainActivity : ComponentActivity() {
             val installed = engine.getInstalledDictionaries()
             if (installed.isEmpty() || installed.none { it.contains("JMdict", ignoreCase = true) }) {
                 engine.downloadJmdict { }
-            }
-        }
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                delay(500)
-                if (!ensureMediaToolsReady(applicationContext)) return@launch
-                val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-                val lastUpdate = prefs.getLong("last_ytdlp_update", 0L)
-                if (System.currentTimeMillis() - lastUpdate > 24 * 60 * 60 * 1000L) {
-                    try {
-                        YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel.NIGHTLY)
-                        prefs.edit().putLong("last_ytdlp_update", System.currentTimeMillis()).apply()
-                    } catch (t: Throwable) {
-                        t.printStackTrace()
-                        CrashReporter.recordHandled(applicationContext, "YoutubeDL update", t)
-                    }
-                }
-            } catch (t: Throwable) {
-                t.printStackTrace()
-                CrashReporter.recordHandled(applicationContext, "Media tools startup", t)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, getString(R.string.media_tools_initialization_failed_toast), Toast.LENGTH_LONG).show()
-                }
             }
         }
 

@@ -23,7 +23,6 @@
 # JNI-backed and process-wrapper libraries use reflection/native entry points.
 -keep class org.videolan.libvlc.** { *; }
 -keep class org.videolan.libvlc.util.** { *; }
--keep class com.yausername.youtubedl_android.** { *; }
 -keep class com.yausername.ffmpeg.** { *; }
 -keep class org.apache.commons.compress.** { *; }
 -keepclassmembers class org.apache.commons.compress.** { *; }

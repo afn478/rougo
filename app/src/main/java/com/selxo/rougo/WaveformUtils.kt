@@ -11,8 +11,6 @@ import android.util.Size
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.unit.sp
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.ffmpeg.execute
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -162,7 +160,7 @@ private fun readMediaDurationMs(context: Context, uri: Uri): Long? {
     }
 }
 private fun decodeAudioWithFfmpeg(context: Context, uri: Uri, startTimeMs: Long, endTimeMs: Long): DecodedPcm? {
-    if (!ensureMediaToolsReady(context)) return null
+    if (!ensureFfmpegReady(context)) return null
 
     resolveFfmpegInput(context, uri, preferFileDescriptor = true)?.let { firstInput ->
         runFfmpegDecode(firstInput, context, startTimeMs, endTimeMs)?.let { return it }
@@ -237,7 +235,7 @@ private fun runFfmpegDecode(
             )
         )
 
-        val rc = FFmpeg.getInstance().execute(cmd.toTypedArray())
+        val rc = executeFfmpeg(context, cmd.toTypedArray())
         if (rc == 0 && output.length() > 0L && output.length() <= MAX_WAVEFORM_PCM_BYTES) {
             DecodedPcm(output.readBytes(), WAVEFORM_SAMPLE_RATE, WAVEFORM_CHANNEL_COUNT)
         } else {
