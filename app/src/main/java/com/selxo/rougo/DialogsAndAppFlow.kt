@@ -249,8 +249,9 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
     val context = LocalContext.current
     val uiScope = rememberCoroutineScope()
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    val sourceLabel = remember(url) { streamSourceLabel(context, url) }
-    val isYoutubeSource = remember(url) { isYoutubeUrl(url) }
+    val normalizedUrl = remember(url) { normalizePipePipeStreamUrl(url) ?: url }
+    val sourceLabel = remember(normalizedUrl) { streamSourceLabel(context, normalizedUrl) }
+    val isYoutubeSource = remember(normalizedUrl) { isYoutubeUrl(normalizedUrl) }
     val downloadBeforePlayback = remember(url) { false }
     val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
     val preferredResolution = remember {
@@ -273,7 +274,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
     LaunchedEffect(url) {
         try {
             val playlistPlan = withContext(Dispatchers.IO) {
-                fetchPipePipePlaylistImportPlan(context, url)
+                fetchPipePipePlaylistImportPlan(context, normalizedUrl)
             }
             if (playlistPlan != null) {
                 onComplete(listOf(playlistPlan.group) + playlistPlan.children, null)
@@ -287,7 +288,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
                 isProcessing = true
                 status = context.getString(R.string.stream_downloading_status, sourceLabel)
                 val downloadedItem = withContext(Dispatchers.IO) {
-                    downloadVideoLinkToLibraryItem(context, url)
+                    downloadVideoLinkToLibraryItem(context, normalizedUrl)
                 }
                 if (downloadedItem != null) {
                     onComplete(listOf(downloadedItem), downloadedItem)
@@ -303,8 +304,8 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
                 isProcessing = true
                 status = context.getString(R.string.stream_opening_quality_status, youtubeResolutionLabel(context, preferredResolution))
                 val fastItem = withContext(Dispatchers.IO) {
-                    fetchFastYoutubeStream(context, url, preferredResolution)
-                        ?.let { createFastYoutubeLibraryItem(it, url) }
+                    fetchFastYoutubeStream(context, normalizedUrl, preferredResolution)
+                        ?.let { createFastYoutubeLibraryItem(it, normalizedUrl) }
                 }
                 if (fastItem != null) {
                     onComplete(listOf(fastItem), fastItem)
@@ -314,7 +315,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
             }
 
             val fetchedSetupData = withContext(Dispatchers.IO) {
-                fetchYoutubeSetupData(context, url)
+                fetchYoutubeSetupData(context, normalizedUrl)
             }
             setupData = fetchedSetupData
             subtitleChoices = if (isYoutubeSource) fetchedSetupData.subtitleChoices else emptyList()
@@ -330,7 +331,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
                 if (format != null) {
                     isProcessing = true
                     status = context.getString(R.string.stream_opening_quality_status, youtubeResolutionLabel(context, preferredResolution))
-                    val item = createYoutubeLibraryItem(context, fetchedSetupData, format, null, url)
+                    val item = createYoutubeLibraryItem(context, fetchedSetupData, format, null, normalizedUrl)
                     onComplete(listOf(item), item)
                 } else {
                     status = context.getString(R.string.stream_preferred_quality_unavailable)
@@ -338,7 +339,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
                 }
             }
         } catch (e: Exception) {
-            status = context.getString(R.string.stream_failed_status, e.localizedMessage.orEmpty())
+            status = context.getString(R.string.stream_failed_status, streamImportErrorMessage(context, e))
             delay(3000)
             onDismiss()
         }
@@ -346,7 +347,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
 
     fun openSelectedFormat(format: YoutubeStreamFormat, subtitleUri: String?) {
         uiScope.launch {
-            val item = createYoutubeLibraryItem(context, setupData, format, subtitleUri, url)
+            val item = createYoutubeLibraryItem(context, setupData, format, subtitleUri, normalizedUrl)
             onComplete(listOf(item), item)
         }
     }
@@ -355,7 +356,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
         val selectedSubtitleLanguage = selectedSubtitleKey
         return if (isYoutubeSource && selectedSubtitleLanguage != null) {
             withContext(Dispatchers.IO) {
-                downloadYoutubeSubtitle(context, url, selectedSubtitleLanguage, isAutoSub)
+                downloadYoutubeSubtitle(context, normalizedUrl, selectedSubtitleLanguage, isAutoSub)
             }
         } else {
             null
@@ -436,7 +437,7 @@ fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (List<Library
                     Spacer(modifier = Modifier.height(12.dp))
 
                     val formats = setupData?.formats?.filter {
-                        ((it.vcodec != "none" && it.acodec != "none") || (it.vcodec == "none" && it.acodec != "none")) &&
+                        (it.vcodec != "none" || it.acodec != "none") &&
                             (!it.url.isNullOrBlank() || !it.manifestUrl.isNullOrBlank())
                     }?.distinctBy { it.formatId ?: "${it.height}-${it.ext}-${it.vcodec}-${it.acodec}" }
                         ?.sortedWith(

@@ -80,20 +80,7 @@ internal fun isYoutubeUrl(url: String): Boolean {
     return host.contains("youtube.com") || host.contains("youtu.be")
 }
 internal fun playableYoutubeUrl(url: String): String? {
-    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return null
-    val host = uri.host.orEmpty().lowercase(Locale.US)
-    val segments = uri.pathSegments
-
-    val hasVideoId = when {
-        host == "youtu.be" || host.endsWith(".youtu.be") -> segments.firstOrNull()?.isNotBlank() == true
-        host.contains("youtube.com") -> {
-            !uri.getQueryParameter("v").isNullOrBlank() ||
-                (segments.size >= 2 && segments[0] in setOf("shorts", "live", "embed") && segments[1].isNotBlank())
-        }
-        else -> false
-    }
-
-    return if (hasVideoId) url else null
+    return normalizePipePipeStreamUrl(url)?.takeIf { isYoutubeUrl(it) }
 }
 internal fun youtubeThumbnailUrl(sourceUrl: String?): String? {
     val videoId = youtubeVideoId(sourceUrl) ?: return null
@@ -637,17 +624,22 @@ internal fun selectPreferredYoutubeFormat(
     val videoFormats = playable
         .filter { it.vcodec != "none" && it.acodec != "none" }
         .sortedWith(compareByDescending<YoutubeStreamFormat> { it.height }.thenByDescending { if (it.isVlcFriendlyVideoFormat()) 1 else 0 }.thenByDescending { it.tbr })
+    val videoOnlyFormats = playable
+        .filter { it.vcodec != "none" && it.acodec == "none" }
+        .sortedWith(compareByDescending<YoutubeStreamFormat> { it.height }.thenByDescending { it.tbr })
 
     return when (preferredResolution) {
-        YOUTUBE_RESOLUTION_AUDIO -> audioFormats.firstOrNull() ?: videoFormats.firstOrNull()
-        YOUTUBE_RESOLUTION_HIGHEST -> videoFormats.firstOrNull() ?: audioFormats.firstOrNull()
+        YOUTUBE_RESOLUTION_AUDIO -> audioFormats.firstOrNull() ?: videoFormats.firstOrNull() ?: videoOnlyFormats.firstOrNull()
+        YOUTUBE_RESOLUTION_HIGHEST -> videoFormats.firstOrNull() ?: videoOnlyFormats.firstOrNull() ?: audioFormats.firstOrNull()
         else -> {
             val targetHeight = preferredResolution.toIntOrNull()
             if (targetHeight == null) {
-                videoFormats.firstOrNull() ?: audioFormats.firstOrNull()
+                videoFormats.firstOrNull() ?: videoOnlyFormats.firstOrNull() ?: audioFormats.firstOrNull()
             } else {
                 videoFormats.firstOrNull { it.height in 1..targetHeight }
                     ?: videoFormats.lastOrNull()
+                    ?: videoOnlyFormats.firstOrNull { it.height in 1..targetHeight }
+                    ?: videoOnlyFormats.lastOrNull()
                     ?: audioFormats.firstOrNull()
             }
         }

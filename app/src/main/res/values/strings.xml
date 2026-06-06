@@ -235,6 +235,10 @@
     <string name="stream_opening_quality_status">Opening %1$s...</string>
     <string name="stream_preferred_quality_unavailable">Preferred quality unavailable. Pick another format.</string>
     <string name="stream_failed_status">Failed: %1$s</string>
+    <string name="stream_error_unsupported_url">Unsupported URL for this provider.</string>
+    <string name="stream_error_geoblocked">This video is geographically restricted.</string>
+    <string name="stream_error_restricted">This video requires login, age verification, or paid access.</string>
+    <string name="stream_error_extraction_failed">Extraction failed: %1$s</string>
     <string name="stream_fetching_subtitles_status">Fetching subtitles...</string>
     <string name="stream_opening_status">Opening stream...</string>
     <string name="stream_subtitle_download_failed_opening_toast">Subtitle download failed; opening video without subtitles.</string>
