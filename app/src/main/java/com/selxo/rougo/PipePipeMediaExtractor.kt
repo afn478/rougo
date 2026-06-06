@@ -7,6 +7,7 @@ import android.util.Log
 import java.io.File
 import java.io.IOException
 import java.util.Locale
+import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import okhttp3.Call
@@ -23,6 +24,7 @@ import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request as ExtractorRequest
 import org.schabi.newpipe.extractor.downloader.Response as ExtractorResponse
 import org.schabi.newpipe.extractor.exceptions.AgeRestrictedContentException
+import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
 import org.schabi.newpipe.extractor.exceptions.GeographicRestrictionException
 import org.schabi.newpipe.extractor.exceptions.NeedLoginException
 import org.schabi.newpipe.extractor.exceptions.PaidContentException
@@ -41,7 +43,7 @@ import org.schabi.newpipe.extractor.stream.VideoStream
 private const val PIPEPIPE_TAG = "PipePipeExtractor"
 
 internal fun isPipePipeSupportedUrl(url: String): Boolean =
-    normalizePipePipeStreamUrl(url) != null
+    planPipePipeExtractionRoute(url) != null
 
 internal fun fetchPipePipeFastStream(
     context: Context,
@@ -65,17 +67,21 @@ internal fun fetchPipePipeFastStream(
 
 internal fun fetchPipePipeSetupData(context: Context, url: String): YoutubeSetupData {
     ensurePipePipeReady(context)
-    val normalizedUrl = normalizePipePipeStreamUrl(url)
+    val route = planPipePipeExtractionRoute(url)
         ?: throw IllegalArgumentException(context.getString(R.string.stream_error_unsupported_url))
-    val service = pipePipeServiceForUrl(normalizedUrl)
-    Log.d(PIPEPIPE_TAG, "setup provider=${detectStreamProvider(normalizedUrl)} normalizedUrl=$normalizedUrl service=${service.serviceInfo.name}")
-    val extractor = service.getStreamExtractor(normalizedUrl)
+    val service = pipePipeServiceForRoute(route)
+    Log.d(
+        PIPEPIPE_TAG,
+        "route provider=${route.provider} normalizedUrl=${route.normalizedUrl} service=${service.serviceInfo.name} " +
+            "pipePipe=${route.usesPipePipeExtractor} ytInitialDataScraper=${route.usesYoutubeInitialDataScraper}"
+    )
+    val extractor = service.getStreamExtractor(route.normalizedUrl)
     val info = try {
         StreamInfo.getInfo(extractor)
     } catch (t: Throwable) {
         Log.w(
             PIPEPIPE_TAG,
-            "extraction failed provider=${detectStreamProvider(normalizedUrl)} normalizedUrl=$normalizedUrl " +
+            "extraction failed provider=${route.provider} normalizedUrl=${route.normalizedUrl} " +
                 "service=${service.serviceInfo.name} error=${t::class.java.simpleName}: ${t.localizedMessage}",
             t
         )
@@ -83,13 +89,13 @@ internal fun fetchPipePipeSetupData(context: Context, url: String): YoutubeSetup
     }
     Log.d(
         PIPEPIPE_TAG,
-        "result provider=${detectStreamProvider(normalizedUrl)} type=${info.streamType} " +
+        "result provider=${route.provider} type=${info.streamType} " +
             "video=${info.videoStreams.orEmpty().size} videoOnly=${info.videoOnlyStreams.orEmpty().size} " +
             "audio=${info.audioStreams.orEmpty().size} hls=${!info.hlsUrl.isNullOrBlank()} dash=${!info.dashMpdUrl.isNullOrBlank()}"
     )
     val subtitles = runCatching { extractor.getSubtitles(MediaFormat.VTT) }
         .getOrElse { runCatching { extractor.getSubtitles(MediaFormat.SRT) }.getOrDefault(info.subtitles.orEmpty()) }
-    return setupDataFromStreamInfo(context, normalizedUrl, info, subtitles)
+    return setupDataFromStreamInfo(context, route.normalizedUrl, info, subtitles)
 }
 
 internal fun resolvePipePipeStreamUrl(context: Context, url: String, formatId: String?): String? {
@@ -143,7 +149,13 @@ internal fun streamImportErrorMessage(context: Context, throwable: Throwable): S
     if (chain.any { it is NeedLoginException || it is PaidContentException || it is AgeRestrictedContentException || it is PrivateContentException }) {
         return context.getString(R.string.stream_error_restricted)
     }
-    val message = chain.firstNotNullOfOrNull { it.localizedMessage?.takeIf(String::isNotBlank) }.orEmpty()
+    val message = chain.asReversed().firstNotNullOfOrNull { it.localizedMessage?.takeIf(String::isNotBlank) }.orEmpty()
+    if (chain.any { it is ContentNotAvailableException }) {
+        return context.getString(
+            R.string.stream_error_extraction_failed,
+            message.ifBlank { ContentNotAvailableException::class.java.simpleName }
+        )
+    }
     val normalizedMessage = message.lowercase(Locale.US)
     if (
         throwable is IllegalArgumentException ||
@@ -241,11 +253,30 @@ private object PipePipeRuntime {
         synchronized(this) {
             if (!initialized) {
                 NewPipe.init(downloader, Localization.DEFAULT)
-                YoutubeParsingHelper.setConsentAccepted(true)
+                configureYoutubePipePipeDefaults()
                 initialized = true
             }
         }
     }
+}
+
+private fun configureYoutubePipePipeDefaults() {
+    YoutubeParsingHelper.setConsentAccepted(true)
+    runCatching {
+        val helper = YoutubeParsingHelper::class.java
+        val version = helper.staticField("WEB_CLIENT_VERSION").get(null) as? String
+            ?: "2.20241126.01.00"
+        helper.staticField("clientVersion").set(null, version)
+        helper.staticField("clientVersionExtracted").setBoolean(null, true)
+        helper.staticField("hardcodedClientVersionValid").set(null, Optional.of(true))
+        Log.d(PIPEPIPE_TAG, "seeded YouTube PipePipe WEB client version=$version")
+    }.onFailure {
+        Log.w(PIPEPIPE_TAG, "failed to seed YouTube PipePipe WEB client version: ${it.localizedMessage}", it)
+    }
+}
+
+private fun Class<*>.staticField(name: String): java.lang.reflect.Field {
+    return getDeclaredField(name).apply { isAccessible = true }
 }
 
 private fun ensurePipePipeReady(context: Context) {
@@ -263,6 +294,14 @@ private fun pipePipeServiceForUrl(url: String): StreamingService {
         StreamProvider.Bilibili -> ServiceList.BiliBili
         StreamProvider.Niconico -> ServiceList.NicoNico
         StreamProvider.Unknown -> NewPipe.getServiceByUrl(url)
+    }
+}
+
+private fun pipePipeServiceForRoute(route: PipePipeExtractionRoute): StreamingService {
+    return when (route.service) {
+        PipePipeExtractionService.YouTube -> ServiceList.YouTube
+        PipePipeExtractionService.Bilibili -> ServiceList.BiliBili
+        PipePipeExtractionService.Niconico -> ServiceList.NicoNico
     }
 }
 

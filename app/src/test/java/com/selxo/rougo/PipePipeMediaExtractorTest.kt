@@ -1,7 +1,9 @@
 package com.selxo.rougo
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PipePipeMediaExtractorTest {
@@ -78,6 +80,36 @@ class PipePipeMediaExtractorTest {
             "https://www.youtube.com/watch?v=BVdLpctzqzk",
             normalizePipePipeStreamUrl("https://www.youtube.com/watch?v=BVdLpctzqzk&list=RDBVdLpctzqzk&start_radio=1")
         )
+    }
+
+    @Test
+    fun youtubeWatchUrlsRouteToPipePipeExtractorNotInitialDataScraper() {
+        val browserRoute = planPipePipeExtractionRoute(
+            "https://www.youtube.com/watch?v=BVdLpctzqzk&list=RDBVdLpctzqzk&start_radio=1"
+        )
+        val sharedRoute = planPipePipeExtractionRoute("https://www.youtube.com/watch?v=EIlIbE9HuB4")
+
+        assertEquals(StreamProvider.YouTube, browserRoute?.provider)
+        assertEquals(PipePipeExtractionService.YouTube, browserRoute?.service)
+        assertEquals("https://www.youtube.com/watch?v=BVdLpctzqzk", browserRoute?.normalizedUrl)
+        assertTrue(browserRoute?.usesPipePipeExtractor == true)
+        assertFalse(browserRoute?.usesYoutubeInitialDataScraper == true)
+
+        assertEquals(StreamProvider.YouTube, sharedRoute?.provider)
+        assertEquals(PipePipeExtractionService.YouTube, sharedRoute?.service)
+        assertEquals("https://www.youtube.com/watch?v=EIlIbE9HuB4", sharedRoute?.normalizedUrl)
+        assertTrue(sharedRoute?.usesPipePipeExtractor == true)
+        assertFalse(sharedRoute?.usesYoutubeInitialDataScraper == true)
+    }
+
+    @Test
+    fun niconicoWatchUrlRoutesToNiconicoPipePipeProvider() {
+        val route = planPipePipeExtractionRoute("https://www.nicovideo.jp/watch/sm46399371")
+
+        assertEquals(StreamProvider.Niconico, route?.provider)
+        assertEquals(PipePipeExtractionService.Niconico, route?.service)
+        assertEquals("https://www.nicovideo.jp/watch/sm46399371", route?.normalizedUrl)
+        assertTrue(route?.usesPipePipeExtractor == true)
     }
 
     @Test

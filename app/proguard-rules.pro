@@ -34,6 +34,14 @@
 -dontwarn org.openjsse.**
 -dontwarn org.slf4j.impl.StaticLoggerBinder
 
+# Rougo seeds PipePipe's WEB client version to bypass brittle HTML ytInitialData version discovery.
+-keepclassmembers class org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper {
+    private static java.lang.String WEB_CLIENT_VERSION;
+    private static java.lang.String clientVersion;
+    private static boolean clientVersionExtracted;
+    private static java.util.Optional hardcodedClientVersionValid;
+}
+
 # Launcher/crash-reporting entry points must keep their manifest names in release builds.
 -keep class com.selxo.rougo.RougoApplication { *; }
 -keep class com.selxo.rougo.MainActivity { *; }
