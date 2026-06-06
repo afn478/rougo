@@ -76,6 +76,7 @@ internal fun fetchPipePipeSetupData(context: Context, url: String): YoutubeSetup
 }
 
 internal fun resolvePipePipeStreamUrl(context: Context, url: String, formatId: String?): String? {
+    StreamUrlCache.get(context, url, formatId)?.let { return it }
     return runCatching {
         val setup = fetchPipePipeSetupData(context, url)
         val format = setup.formats.firstOrNull { it.formatId == formatId }
@@ -85,6 +86,13 @@ internal fun resolvePipePipeStreamUrl(context: Context, url: String, formatId: S
     }.onFailure {
         CrashReporter.recordHandled(context, "PipePipe stream URL", it)
     }.getOrNull()
+        ?.also { resolvedUrl ->
+            StreamUrlCache.put(context, url, formatId, resolvedUrl, detectStreamProvider(url))
+        }
+}
+
+internal fun invalidateResolvedStreamUrl(context: Context, url: String, formatId: String?) {
+    StreamUrlCache.invalidate(context, url, formatId)
 }
 
 internal fun fetchPipePipePlaylistImportPlan(context: Context, url: String): PlaylistImportPlan? {
