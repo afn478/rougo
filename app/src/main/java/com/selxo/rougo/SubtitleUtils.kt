@@ -46,7 +46,7 @@ fun parseSimpleSubtitles(context: Context, uri: Uri): List<SubtitleCue> {
                     if (parts.size > textIndex) {
                         val startMs = parseTimeMs(parts[startIndex].trim())
                         val endMs = parseTimeMs(parts[endIndex].trim())
-                        val text = parts[textIndex].trim().replace(Regex("\\{.*?\\}"), "").replace("\\N", "\n")
+                        val text = cleanSubtitleText(parts[textIndex].trim())
                         if (text.isNotBlank()) cues.add(SubtitleCue(startMs, endMs, text))
                     }
                     return@forEachLine
@@ -65,7 +65,7 @@ fun parseSimpleSubtitles(context: Context, uri: Uri): List<SubtitleCue> {
                     currentStart = parseTimeMs(startStr)
                     currentEnd = parseTimeMs(endStr)
                 } else if (trimmed.isNotBlank() && !trimmed.matches(Regex("^\\d+$"))) {
-                    currentText.append(trimmed.replace(Regex("<[^>]*>"), "")).append("\n")
+                    currentText.append(cleanSubtitleText(trimmed)).append("\n")
                 }
             }
             if (currentStart != -1L && currentText.isNotBlank()) {
@@ -74,6 +74,41 @@ fun parseSimpleSubtitles(context: Context, uri: Uri): List<SubtitleCue> {
         }
     } catch (e: Exception) { e.printStackTrace() }
     return cues.also { SubtitleParseCache.put(cacheKey, it) }
+}
+
+internal fun cleanSubtitleText(rawText: String): String {
+    return rawText
+        .replace(Regex("\\{.*?\\}"), "")
+        .replace("\\N", "\n")
+        .replace(Regex("<[^>]*>"), "")
+        .decodeSubtitleHtmlEntitiesOnce()
+}
+
+private val subtitleEntityRegex = Regex("&(#x[0-9A-Fa-f]+|#\\d+|amp|lt|gt|quot|apos|nbsp);", RegexOption.IGNORE_CASE)
+
+private fun String.decodeSubtitleHtmlEntitiesOnce(): String {
+    return subtitleEntityRegex.replace(this) { match ->
+        val entity = match.groupValues[1]
+        when {
+            entity.equals("amp", ignoreCase = true) -> "&"
+            entity.equals("lt", ignoreCase = true) -> "<"
+            entity.equals("gt", ignoreCase = true) -> ">"
+            entity.equals("quot", ignoreCase = true) -> "\""
+            entity.equals("apos", ignoreCase = true) -> "'"
+            entity.equals("nbsp", ignoreCase = true) -> " "
+            entity.startsWith("#x", ignoreCase = true) -> entity.substring(2)
+                .toIntOrNull(radix = 16)
+                ?.takeIf { Character.isValidCodePoint(it) }
+                ?.let { String(Character.toChars(it)) }
+                ?: match.value
+            entity.startsWith("#") -> entity.substring(1)
+                .toIntOrNull()
+                ?.takeIf { Character.isValidCodePoint(it) }
+                ?.let { String(Character.toChars(it)) }
+                ?: match.value
+            else -> match.value
+        }
+    }
 }
 
 internal fun subtitleParseCacheKey(uriString: String, length: Long?, lastModified: Long?): String {

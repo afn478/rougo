@@ -1,7 +1,7 @@
 package com.selxo.rougo
 
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class SubtitleCacheTest {
@@ -15,5 +15,29 @@ class SubtitleCacheTest {
         assertEquals(first, same)
         assertNotEquals(first, changedLength)
         assertNotEquals(first, changedModified)
+    }
+
+    @Test
+    fun subtitleTextDecodesCommonAndNumericHtmlEntities() {
+        assertEquals(
+            "Tom & Jerry 'said' \"hi\" <again>",
+            cleanSubtitleText("Tom &amp; Jerry &#39;said&#39; &quot;hi&quot; &lt;again&gt;")
+        )
+    }
+
+    @Test
+    fun subtitleTextDecodesOnlyOneEntityLayer() {
+        assertEquals(
+            "Already &amp; encoded",
+            cleanSubtitleText("Already &amp;amp; encoded")
+        )
+    }
+
+    @Test
+    fun subtitleTextRemovesSubtitleMarkupBeforeDecoding() {
+        assertEquals(
+            "Line one\nLine two & more",
+            cleanSubtitleText("{\\an8}<i>Line one</i>\\NLine two &amp; more")
+        )
     }
 }

@@ -435,10 +435,10 @@ fun LibraryScreen(
                         }
                         val item = (row as LibraryDisplayRow.Media).item
                         val hasLocalCopy = item.hasDownloadedLocalCopy()
-                        val youtubeSourceUrl = item.sourceUrl?.takeIf { isYoutubeUrl(it) }
-                        val canManageYoutubeDownload = youtubeSourceUrl != null
+                        val pipePipeSourceUrl = item.sourceUrl?.takeIf { canDownloadStreamSource(it) }
+                        val canManagePipePipeDownload = pipePipeSourceUrl != null
 
-                        val downloadState = if (canManageYoutubeDownload) {
+                        val downloadState = if (canManagePipePipeDownload) {
                             downloadStates[item.id]
                                 ?: if (hasLocalCopy) LibraryDownloadState.Complete else LibraryDownloadState.Idle
                         } else {
@@ -452,7 +452,7 @@ fun LibraryScreen(
                             downloadState = downloadState,
                             modifier = if (row.isPlaylistChild) Modifier.padding(start = 18.dp) else Modifier,
 
-                            onDeleteDownload = if (canManageYoutubeDownload && hasLocalCopy) {
+                            onDeleteDownload = if (canManagePipePipeDownload && hasLocalCopy) {
                                 {
                                     val updatedItem = deleteDownloadedLocalCopy(context, item)
                                     if (updatedItem != null) {
@@ -468,9 +468,9 @@ fun LibraryScreen(
                                 null
                             },
 
-                            onDownload = if (canManageYoutubeDownload && !hasLocalCopy) {
+                            onDownload = if (canManagePipePipeDownload && !hasLocalCopy) {
                                 {
-                                    val sourceUrl = youtubeSourceUrl
+                                    val sourceUrl = pipePipeSourceUrl
 
                                     if (downloadState != LibraryDownloadState.Loading) {
                                         requestDownloadNotificationPermissionIfNeeded()

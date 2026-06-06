@@ -49,7 +49,8 @@ private data class DecodedPcm(
 internal data class FfmpegInput(
     val value: String,
     val tempFile: File? = null,
-    val pfd: ParcelFileDescriptor? = null
+    val pfd: ParcelFileDescriptor? = null,
+    val cookieHeader: String? = null
 )
 private data class PitchEstimate(val hz: Float, val confidence: Float)
 internal data class PitchScale(val minLogHz: Double, val maxLogHz: Double)
@@ -148,7 +149,12 @@ private fun readMediaDurationMs(context: Context, uri: Uri): Long? {
                     retriever.setDataSource(pfd.fileDescriptor)
                 }
                 uri.scheme == "file" -> retriever.setDataSource(uri.path)
-                uri.scheme?.startsWith("http", ignoreCase = true) == true -> retriever.setDataSource(uri.toString(), mapOf("User-Agent" to "Mozilla/5.0"))
+                uri.scheme?.startsWith("http", ignoreCase = true) == true -> {
+                    val request = streamRequestMetadataForUrl(uri.toString())
+                    val headers = mutableMapOf("User-Agent" to "Mozilla/5.0")
+                    request.cookieHeader?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
+                    retriever.setDataSource(request.mediaUrl, headers)
+                }
                 else -> retriever.setDataSource(context, uri)
             }
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.takeIf { it > 0L }
@@ -205,6 +211,10 @@ private fun runFfmpegDecode(
         if (input.value.startsWith("http://", ignoreCase = true) || input.value.startsWith("https://", ignoreCase = true)) {
             cmd.add("-user_agent")
             cmd.add("Mozilla/5.0")
+            input.cookieHeader?.takeIf { it.isNotBlank() }?.let {
+                cmd.add("-headers")
+                cmd.add("Cookie: $it\r\n")
+            }
         }
 
         cmd.add("-i")
@@ -271,7 +281,10 @@ internal fun resolveFfmpegInput(context: Context, uri: Uri, preferFileDescriptor
                 materializeContentUriForFfmpeg(context, uri)?.let { FfmpegInput(it.absolutePath) }
             }
         }
-        "http", "https" -> FfmpegInput(uri.toString())
+        "http", "https" -> {
+            val request = streamRequestMetadataForUrl(uri.toString())
+            FfmpegInput(request.mediaUrl, cookieHeader = request.cookieHeader)
+        }
         else -> FfmpegInput(uri.toString())
     }
 }
@@ -343,7 +356,10 @@ private fun decodeAudioWithMediaCodec(context: Context, uri: Uri, startTimeMs: L
             }
             uri.scheme == "file" -> extractor.setDataSource(uri.path!!)
             uri.scheme?.startsWith("http", ignoreCase = true) == true -> {
-                extractor.setDataSource(uri.toString(), mapOf("User-Agent" to "Mozilla/5.0"))
+                val request = streamRequestMetadataForUrl(uri.toString())
+                val headers = mutableMapOf("User-Agent" to "Mozilla/5.0")
+                request.cookieHeader?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
+                extractor.setDataSource(request.mediaUrl, headers)
             }
             else -> extractor.setDataSource(context, uri, null)
         }

@@ -84,6 +84,15 @@ class PipePipeMediaExtractorTest {
     }
 
     @Test
+    fun streamDownloadGateCoversAllPipePipeProviders() {
+        assertTrue(canDownloadStreamSource("https://www.youtube.com/watch?v=EIlIbE9HuB4"))
+        assertTrue(canDownloadStreamSource("https://www.bilibili.com/video/BV1fqVh6sEaF?p=1"))
+        assertTrue(canDownloadStreamSource("https://www.nicovideo.jp/watch/sm46399371"))
+        assertFalse(canDownloadStreamSource("https://example.com/watch/1"))
+        assertFalse(canDownloadStreamSource(null))
+    }
+
+    @Test
     fun youtubeWatchUrlsRouteToPipePipeExtractorNotInitialDataScraper() {
         val browserRoute = planPipePipeExtractionRoute(
             "https://www.youtube.com/watch?v=BVdLpctzqzk&list=RDBVdLpctzqzk&start_radio=1"

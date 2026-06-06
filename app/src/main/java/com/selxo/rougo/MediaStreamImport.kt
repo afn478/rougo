@@ -89,6 +89,9 @@ internal fun isYoutubeUrl(url: String): Boolean {
 internal fun playableYoutubeUrl(url: String): String? {
     return normalizePipePipeStreamUrl(url)?.takeIf { isYoutubeUrl(it) }
 }
+internal fun canDownloadStreamSource(url: String?): Boolean {
+    return !url.isNullOrBlank() && isPipePipeSupportedUrl(url)
+}
 internal fun youtubeThumbnailUrl(sourceUrl: String?): String? {
     val videoId = youtubeVideoId(sourceUrl) ?: return null
     return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
