@@ -20,8 +20,9 @@ internal fun mergePipePipeStreamFormats(
     audioFormats: List<YoutubeStreamFormat>,
     manifestFormats: List<YoutubeStreamFormat>
 ): List<YoutubeStreamFormat> {
-    val companionAudio = selectBestCompanionAudioFormat(audioFormats)
-    val pairedVideoFormats = videoOnlyFormats.map { it.withCompanionAudio(companionAudio) }
+    val pairedVideoFormats = videoOnlyFormats.map { videoFormat ->
+        videoFormat.withCompanionAudio(selectBestCompanionAudioFormat(audioFormats, videoFormat))
+    }
     return (muxedVideoFormats + pairedVideoFormats + audioFormats + manifestFormats)
         .distinctBy { it.streamMappingKey() }
 }
@@ -39,19 +40,44 @@ internal fun YoutubeStreamFormat.withCompanionAudio(audioFormat: YoutubeStreamFo
         acodec = companionCodec,
         audioUrl = companionUrl,
         audioFormatId = audioFormat.formatId,
+        audioExt = audioFormat.ext,
+        audioCodec = companionCodec,
         formatNote = pairedFormatNote(formatNote, audioFormat.formatNote)
     )
 }
 
-internal fun selectBestCompanionAudioFormat(audioFormats: List<YoutubeStreamFormat>): YoutubeStreamFormat? {
+internal fun selectBestCompanionAudioFormat(
+    audioFormats: List<YoutubeStreamFormat>,
+    videoFormat: YoutubeStreamFormat? = null
+): YoutubeStreamFormat? {
     return audioFormats
         .filter { it.vcodec == "none" && it.acodec != "none" && it.playbackUrl() != null }
         .sortedWith(
-            compareByDescending<YoutubeStreamFormat> { if (it.isVlcFriendlyAudioFormat()) 1 else 0 }
+            compareByDescending<YoutubeStreamFormat> { it.companionContainerScore(videoFormat) }
+                .thenByDescending { if (it.isVlcFriendlyAudioFormat()) 1 else 0 }
                 .thenByDescending { it.tbr }
                 .thenByDescending { it.formatId.orEmpty() }
         )
         .firstOrNull()
+}
+
+private fun YoutubeStreamFormat.companionContainerScore(videoFormat: YoutubeStreamFormat?): Int {
+    val videoExt = videoFormat?.ext?.lowercase(Locale.US).orEmpty()
+    if (videoExt.isBlank()) return 1
+    val audioExtValue = ext?.lowercase(Locale.US).orEmpty()
+    val audioCodecValue = acodec?.lowercase(Locale.US).orEmpty()
+    return when {
+        videoExt in setOf("mp4", "m4v") &&
+            (audioExtValue in setOf("m4a", "mp4", "aac") ||
+                audioCodecValue.startsWith("mp4a") ||
+                audioCodecValue.startsWith("aac")) -> 3
+        videoExt == "webm" &&
+            (audioExtValue == "webm" ||
+                audioCodecValue.contains("opus") ||
+                audioCodecValue.contains("vorbis")) -> 3
+        videoExt in setOf("mp4", "m4v", "webm") -> 0
+        else -> 1
+    }
 }
 
 private fun pairedFormatNote(videoNote: String?, audioNote: String?): String? {
@@ -71,6 +97,8 @@ private fun YoutubeStreamFormat.streamMappingKey(): String {
         audioFormatId.orEmpty(),
         url.orEmpty(),
         audioUrl.orEmpty(),
+        audioExt.orEmpty(),
+        audioCodec.orEmpty(),
         manifestUrl.orEmpty(),
         height.toString(),
         vcodec.orEmpty().lowercase(Locale.US),

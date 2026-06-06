@@ -198,4 +198,75 @@ class PipePipeMediaExtractorTest {
         assertEquals("https://stream.example/audio-high.m4a", selected?.audioUrl)
         assertNotEquals("none", selected?.acodec)
     }
+
+    @Test
+    fun videoOnlyMp4PrefersM4aCompanionAudioForDownloadMuxing() {
+        val webmAudio = YoutubeStreamFormat(
+            formatId = "audio-webm-high",
+            formatNote = "160k",
+            ext = "webm",
+            vcodec = "none",
+            acodec = "opus",
+            height = 0,
+            tbr = 160,
+            url = "https://stream.example/audio-high.webm",
+            manifestUrl = null,
+            protocol = "http"
+        )
+        val m4aAudio = webmAudio.copy(
+            formatId = "audio-m4a-lower",
+            formatNote = "128k",
+            ext = "m4a",
+            acodec = "mp4a.40.2",
+            tbr = 128,
+            url = "https://stream.example/audio-lower.m4a"
+        )
+        val mapped = mergePipePipeStreamFormats(
+            muxedVideoFormats = emptyList(),
+            videoOnlyFormats = listOf(
+                YoutubeStreamFormat(
+                    formatId = "video-720-mp4",
+                    formatNote = "720p",
+                    ext = "mp4",
+                    vcodec = "avc1.64001f",
+                    acodec = "none",
+                    height = 720,
+                    tbr = 1200,
+                    url = "https://stream.example/video.mp4",
+                    manifestUrl = null,
+                    protocol = "http"
+                )
+            ),
+            audioFormats = listOf(webmAudio, m4aAudio),
+            manifestFormats = emptyList()
+        )
+        val selected = selectPreferredYoutubeFormat(mapped, "720")
+
+        assertEquals("video-720-mp4", selected?.formatId)
+        assertEquals("audio-m4a-lower", selected?.audioFormatId)
+        assertEquals("m4a", selected?.audioExt)
+        assertEquals("mp4", selected?.downloadOutputExtension())
+    }
+
+    @Test
+    fun mixedSeparateAudioVideoDownloadsUseMkvContainer() {
+        val mixed = YoutubeStreamFormat(
+            formatId = "video-720-mp4",
+            formatNote = "720p",
+            ext = "mp4",
+            vcodec = "avc1",
+            acodec = "opus",
+            height = 720,
+            tbr = 1200,
+            url = "https://stream.example/video.mp4",
+            manifestUrl = null,
+            protocol = "http",
+            audioUrl = "https://stream.example/audio.webm",
+            audioFormatId = "audio-webm",
+            audioExt = "webm",
+            audioCodec = "opus"
+        )
+
+        assertEquals("mkv", mixed.downloadOutputExtension())
+    }
 }

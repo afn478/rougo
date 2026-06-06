@@ -55,7 +55,9 @@ internal data class YoutubeStreamFormat(
     val manifestUrl: String?,
     val protocol: String?,
     val audioUrl: String? = null,
-    val audioFormatId: String? = null
+    val audioFormatId: String? = null,
+    val audioExt: String? = null,
+    val audioCodec: String? = null
 )
 internal data class YoutubeSetupData(
     val title: String,
@@ -81,6 +83,8 @@ internal data class ResolvedStreamMedia(
 )
 private const val DOWNLOAD_NOTIFICATION_PREFS = "rougo_download_notifications"
 private const val PREF_COMPLETED_DOWNLOAD_NOTIFICATION_IDS = "completed_download_notification_ids"
+private const val MEDIA_IMPORT_TAG = "MediaStreamImport"
+private const val MEDIA_DOWNLOAD_FFMPEG_TIMEOUT_MS = 30L * 60L * 1000L
 private val completedDownloadNotificationLock = Any()
 internal fun isYoutubeUrl(url: String): Boolean {
     val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
@@ -705,10 +709,28 @@ private fun YoutubeStreamFormat.isDirectHttpDownload(): Boolean {
         extValue != "mpd"
 }
 
-private fun YoutubeStreamFormat.downloadOutputExtension(): String {
+internal fun YoutubeStreamFormat.downloadOutputExtension(): String {
+    if (!audioUrl.isNullOrBlank()) return pairedDownloadOutputExtension()
     val extValue = ext?.lowercase(Locale.US)?.takeIf { it.matches(Regex("[a-z0-9]{2,5}")) }
     if (extValue != null && extValue !in setOf("m3u8", "mpd")) return extValue
     return if (vcodec == "none") "m4a" else "mp4"
+}
+
+private fun YoutubeStreamFormat.pairedDownloadOutputExtension(): String {
+    val videoExt = ext?.lowercase(Locale.US).orEmpty()
+    val companionExt = audioExt?.lowercase(Locale.US).orEmpty()
+    val companionCodec = (audioCodec ?: acodec).orEmpty().lowercase(Locale.US)
+    return when {
+        videoExt in setOf("mp4", "m4v") &&
+            (companionExt in setOf("m4a", "mp4", "aac") ||
+                companionCodec.startsWith("mp4a") ||
+                companionCodec.startsWith("aac")) -> "mp4"
+        videoExt == "webm" &&
+            (companionExt == "webm" ||
+                companionCodec.contains("opus") ||
+                companionCodec.contains("vorbis")) -> "webm"
+        else -> "mkv"
+    }
 }
 
 private fun safeDownloadFileComponent(value: String): String {
@@ -830,7 +852,17 @@ private fun downloadExtractedStreamWithFfmpeg(
     }
     cmd.add(outputFile.absolutePath)
 
-    return executeFfmpeg(context, cmd.toTypedArray()) == 0 && outputFile.length() > 0L
+    val rc = executeFfmpeg(context, cmd.toTypedArray(), timeoutMs = MEDIA_DOWNLOAD_FFMPEG_TIMEOUT_MS)
+    if (rc != 0 || outputFile.length() <= 0L) {
+        Log.w(
+            MEDIA_IMPORT_TAG,
+            "FFmpeg download failed rc=$rc outputBytes=${outputFile.length()} " +
+                "formatId=${selection.format.formatId.orEmpty()} ext=${selection.format.ext.orEmpty()} " +
+                "audioFormatId=${selection.format.audioFormatId.orEmpty()} audioExt=${selection.format.audioExt.orEmpty()} " +
+                "outputExt=${selection.outputExtension}"
+        )
+    }
+    return rc == 0 && outputFile.length() > 0L
 }
 
 internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, existingItem: LibraryItem? = null): LibraryItem? {
