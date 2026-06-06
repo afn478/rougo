@@ -751,7 +751,11 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         var pfd: ParcelFileDescriptor? = null
 
         try {
-            val mediaUri = actualMediaUri!!.toUri()
+            val primaryRequest = streamRequestMetadataForUrl(actualMediaUri)
+            val companionAudioRequest = actualStreamAudioUri
+                ?.takeIf { it.isNotBlank() && it != actualMediaUri }
+                ?.let { streamRequestMetadataForUrl(it) }
+            val mediaUri = primaryRequest.mediaUrl.toUri()
             val media = if (mediaUri.scheme == "content") {
                 pfd = context.contentResolver.openFileDescriptor(mediaUri, "r")
                 if (pfd != null) {
@@ -772,15 +776,20 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             libraryItem.httpReferer?.takeIf { it.isNotBlank() }?.let {
                 media.addOption(":http-referrer=$it")
             }
-            actualStreamAudioUri
-                ?.takeIf { it.isNotBlank() && it != actualMediaUri }
-                ?.let { audioUri ->
-                    try {
-                        media.addSlave(IMedia.Slave(IMedia.Slave.Type.Audio, 0, audioUri))
-                    } catch (e: Exception) {
-                        CrashReporter.recordHandled(context, "Attach companion audio stream", e)
-                    }
+            sequenceOf(primaryRequest.cookieHeader, companionAudioRequest?.cookieHeader)
+                .filterNotNull()
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString("; ")
+                .takeIf { it.isNotBlank() }
+                ?.let { media.addOption(":http-cookie=$it") }
+            companionAudioRequest?.let { audioRequest ->
+                try {
+                    media.addSlave(IMedia.Slave(IMedia.Slave.Type.Audio, 0, audioRequest.mediaUrl))
+                } catch (e: Exception) {
+                    CrashReporter.recordHandled(context, "Attach companion audio stream", e)
                 }
+            }
             vlcPlayer.media = media
             media.release()
 

@@ -3,6 +3,7 @@ package com.selxo.rougo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -110,6 +111,33 @@ class PipePipeMediaExtractorTest {
         assertEquals(PipePipeExtractionService.Niconico, route?.service)
         assertEquals("https://www.nicovideo.jp/watch/sm46399371", route?.normalizedUrl)
         assertTrue(route?.usesPipePipeExtractor == true)
+    }
+
+    @Test
+    fun niconicoDomandFragmentCookieIsMappedToRequestMetadata() {
+        val request = streamRequestMetadataForUrl(
+            "https://delivery.domand.nicovideo.jp/hlsbid/session/playlists/media/video-h264-720p.m3u8?ht2_nicovideo=123" +
+                "#cookie=domand_bid%3D6b3112820bb69b5c31d9ae2daa624f9b024b1c7a1bab02ae9ef1f7cceae08bb0&length=130"
+        )
+
+        assertEquals(
+            "https://delivery.domand.nicovideo.jp/hlsbid/session/playlists/media/video-h264-720p.m3u8?ht2_nicovideo=123",
+            request.mediaUrl
+        )
+        assertEquals(
+            "domand_bid=6b3112820bb69b5c31d9ae2daa624f9b024b1c7a1bab02ae9ef1f7cceae08bb0",
+            request.cookieHeader
+        )
+        assertEquals(130L, request.lengthSeconds)
+    }
+
+    @Test
+    fun streamRequestMetadataLeavesPlainUrlsAlone() {
+        val request = streamRequestMetadataForUrl("https://video.example/stream.m3u8?token=abc")
+
+        assertEquals("https://video.example/stream.m3u8?token=abc", request.mediaUrl)
+        assertNull(request.cookieHeader)
+        assertNull(request.lengthSeconds)
     }
 
     @Test

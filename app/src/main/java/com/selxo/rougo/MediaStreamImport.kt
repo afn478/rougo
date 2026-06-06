@@ -724,12 +724,14 @@ private fun downloadExtractedStreamDirectly(
     outputFile: File,
     onProgress: (Int?) -> Unit
 ): Boolean {
-    val connection = (URL(selection.mediaUrl).openConnection() as HttpURLConnection).apply {
+    val mediaRequest = streamRequestMetadataForUrl(selection.mediaUrl)
+    val connection = (URL(mediaRequest.mediaUrl).openConnection() as HttpURLConnection).apply {
         connectTimeout = 15000
         readTimeout = 30000
         instanceFollowRedirects = true
         setRequestProperty("User-Agent", selection.setupData.httpUserAgent ?: "Mozilla/5.0")
         selection.setupData.httpReferer?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Referer", it) }
+        mediaRequest.cookieHeader?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Cookie", it) }
     }
 
     return try {
@@ -774,24 +776,40 @@ private fun downloadExtractedStreamWithFfmpeg(
     selection: MediaDownloadSelection,
     outputFile: File
 ): Boolean {
+    val mediaRequest = streamRequestMetadataForUrl(selection.mediaUrl)
+    val audioRequest = selection.audioUrl
+        ?.takeIf { it.isNotBlank() }
+        ?.let { streamRequestMetadataForUrl(it) }
     val cmd = mutableListOf("-y", "-hide_banner", "-loglevel", "error", "-nostdin")
-    fun addInputHeaders() {
+    fun addInputHeaders(request: StreamRequestMetadata) {
         selection.setupData.httpUserAgent?.takeIf { it.isNotBlank() }?.let {
             cmd.add("-user_agent")
             cmd.add(it)
         }
-        selection.setupData.httpReferer?.takeIf { it.isNotBlank() }?.let {
+        val headers = buildString {
+            selection.setupData.httpReferer?.takeIf { it.isNotBlank() }?.let {
+                append("Referer: ")
+                append(it)
+                append("\r\n")
+            }
+            request.cookieHeader?.takeIf { it.isNotBlank() }?.let {
+                append("Cookie: ")
+                append(it)
+                append("\r\n")
+            }
+        }
+        if (headers.isNotBlank()) {
             cmd.add("-headers")
-            cmd.add("Referer: $it\r\n")
+            cmd.add(headers)
         }
     }
-    addInputHeaders()
+    addInputHeaders(mediaRequest)
     cmd.add("-i")
-    cmd.add(selection.mediaUrl)
-    if (!selection.audioUrl.isNullOrBlank()) {
-        addInputHeaders()
+    cmd.add(mediaRequest.mediaUrl)
+    if (audioRequest != null) {
+        addInputHeaders(audioRequest)
         cmd.add("-i")
-        cmd.add(selection.audioUrl)
+        cmd.add(audioRequest.mediaUrl)
         cmd.add("-map")
         cmd.add("0:v:0")
         cmd.add("-map")
