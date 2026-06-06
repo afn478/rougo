@@ -28,6 +28,12 @@
 -keepclassmembers class org.apache.commons.compress.** { *; }
 -dontwarn org.apache.commons.compress.**
 
+# Optional providers probed by OkHttp/transitive libraries. Android uses the platform TLS stack here.
+-dontwarn org.bouncycastle.jsse.**
+-dontwarn org.conscrypt.**
+-dontwarn org.openjsse.**
+-dontwarn org.slf4j.impl.StaticLoggerBinder
+
 # Launcher/crash-reporting entry points must keep their manifest names in release builds.
 -keep class com.selxo.rougo.RougoApplication { *; }
 -keep class com.selxo.rougo.MainActivity { *; }
