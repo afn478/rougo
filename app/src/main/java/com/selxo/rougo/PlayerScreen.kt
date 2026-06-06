@@ -71,6 +71,7 @@ import kotlinx.coroutines.withContext
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media as VLCMedia
 import org.videolan.libvlc.MediaPlayer as VLCMediaPlayer
+import org.videolan.libvlc.interfaces.IMedia
 import org.videolan.libvlc.util.VLCVideoLayout
 
 private enum class RepeatPracticePhase { Idle, RecordingAttempt, PlayingAttempt }
@@ -138,6 +139,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
 
     val initialPlayableUri = remember(libraryItem.id) { initialPlayableMediaUri(libraryItem) }
     var actualMediaUri by remember(libraryItem.id) { mutableStateOf(initialPlayableUri) }
+    var actualStreamAudioUri by remember(libraryItem.id) { mutableStateOf(libraryItem.streamAudioUri) }
     var isRefreshingStream by remember(libraryItem.id) { mutableStateOf(libraryItem.sourceUrl != null && initialPlayableUri == null) }
     var streamRefreshAttempts by remember(libraryItem.id) { mutableIntStateOf(0) }
     var resumePlaybackAfterPause by remember { mutableStateOf(false) }
@@ -487,17 +489,19 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         val currentSourceUrl = libraryItem.sourceUrl
         if (currentSourceUrl != null && actualMediaUri == null) {
             isRefreshingStream = true
-            val resolvedUri = withContext(Dispatchers.IO) {
+            val resolvedMedia = withContext(Dispatchers.IO) {
                 try {
-                    resolveYoutubeStreamUrl(context, currentSourceUrl, libraryItem.formatId)
+                    resolveYoutubeStreamMedia(context, currentSourceUrl, libraryItem.formatId)
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    initialPlayableMediaUri(libraryItem)
+                    initialPlayableMediaUri(libraryItem)?.let { ResolvedStreamMedia(it, libraryItem.streamAudioUri) }
                 }
             }
-            if (!resolvedUri.isNullOrBlank()) {
+            val resolvedUri = resolvedMedia?.mediaUrl?.takeIf { it.isNotBlank() }
+            if (resolvedUri != null) {
+                actualStreamAudioUri = resolvedMedia.audioUrl
                 actualMediaUri = resolvedUri
-                libraryItem = libraryItem.copy(progress = currentPos)
+                libraryItem = libraryItem.copy(progress = currentPos, streamAudioUri = resolvedMedia.audioUrl)
                 LibraryManager(context).saveItem(libraryItem)
             }
             isRefreshingStream = false
@@ -519,7 +523,12 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                 IllegalStateException("Blocked recording media URI from replacing source media URI")
             )
         }
-        return decision.item
+        val streamAudioUri = if (decision.item.mediaUri == decision.item.sourceUrl) {
+            null
+        } else {
+            actualStreamAudioUri?.takeIf { it.isNotBlank() }
+        }
+        return decision.item.copy(streamAudioUri = streamAudioUri)
     }
 
     fun syncWithStorage() {
@@ -735,7 +744,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
         }
     }
 
-    DisposableEffect(actualMediaUri, videoLayout) {
+    DisposableEffect(actualMediaUri, actualStreamAudioUri, videoLayout) {
         if (actualMediaUri == null) return@DisposableEffect onDispose { }
         if (libraryItem.isVideo && videoLayout == null) return@DisposableEffect onDispose { }
 
@@ -763,6 +772,15 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
             libraryItem.httpReferer?.takeIf { it.isNotBlank() }?.let {
                 media.addOption(":http-referrer=$it")
             }
+            actualStreamAudioUri
+                ?.takeIf { it.isNotBlank() && it != actualMediaUri }
+                ?.let { audioUri ->
+                    try {
+                        media.addSlave(IMedia.Slave(IMedia.Slave.Type.Audio, 0, audioUri))
+                    } catch (e: Exception) {
+                        CrashReporter.recordHandled(context, "Attach companion audio stream", e)
+                    }
+                }
             vlcPlayer.media = media
             media.release()
 
@@ -801,18 +819,20 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                             uiScope.launch {
                                 streamRefreshAttempts += 1
                                 isRefreshingStream = true
-                                val refreshedUri = withContext(Dispatchers.IO) {
+                                val refreshedMedia = withContext(Dispatchers.IO) {
                                     try {
                                         invalidateResolvedStreamUrl(context, sourceUrl, libraryItem.formatId)
-                                        resolveYoutubeStreamUrl(context, sourceUrl, libraryItem.formatId)
+                                        resolveYoutubeStreamMedia(context, sourceUrl, libraryItem.formatId)
                                     } catch (e: Exception) {
                                         e.printStackTrace()
                                         null
                                     }
                                 }
-                                if (!refreshedUri.isNullOrBlank()) {
-                                    libraryItem = libraryItem.copy(progress = currentPos)
+                                val refreshedUri = refreshedMedia?.mediaUrl?.takeIf { it.isNotBlank() }
+                                if (refreshedUri != null) {
+                                    libraryItem = libraryItem.copy(progress = currentPos, streamAudioUri = refreshedMedia.audioUrl)
                                     LibraryManager(context).saveItem(libraryItem)
+                                    actualStreamAudioUri = refreshedMedia.audioUrl
                                     actualMediaUri = refreshedUri
                                 } else {
                                     Toast.makeText(context, context.getString(R.string.player_playback_failed_stream), Toast.LENGTH_SHORT).show()

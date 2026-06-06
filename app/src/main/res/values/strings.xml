@@ -151,7 +151,7 @@
     <string name="player_loading_subtitles">Loading subtitles...</string>
     <string name="player_no_valid_subtitles">No valid text found in subtitle file.</string>
     <string name="player_error_playing_audio">Error playing audio</string>
-    <string name="player_playback_failed_stream">Playback failed. Stream might be geo-blocked or broken.</string>
+    <string name="player_playback_failed_stream">Playback failed. The stream may be expired, unsupported, or restricted.</string>
     <string name="player_initialization_error">Playback Initialization Error: %1$s</string>
     <string name="player_recording_too_short_toast">Recording was too short!</string>
     <string name="player_recording_segment_too_short_toast">Recording segment was too short.</string>

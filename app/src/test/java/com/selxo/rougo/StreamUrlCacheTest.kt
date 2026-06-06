@@ -35,6 +35,22 @@ class StreamUrlCacheTest {
     }
 
     @Test
+    fun companionAudioDoesNotChangeMainUrlExpiryRules() {
+        val now = 2_000L
+
+        assertTrue(
+            isValidCachedStreamUrl(
+                CachedStreamUrl(
+                    streamUrl = "https://stream.example/video.mp4",
+                    expiresAtMs = now + STREAM_URL_CACHE_SAFETY_MARGIN_MS + 1L,
+                    audioUrl = "https://stream.example/audio.m4a"
+                ),
+                now
+            )
+        )
+    }
+
+    @Test
     fun cacheExpiryIsShortLivedByProvider() {
         val now = 10_000L
 

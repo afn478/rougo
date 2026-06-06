@@ -23,6 +23,7 @@ data class LibraryItem(
     val sourceUrl: String? = null, val formatId: String? = null,
     val artist: String? = null, val album: String? = null, val albumArtist: String? = null,
     val genre: String? = null, val year: String? = null, val coverArtPath: String? = null,
+    val streamAudioUri: String? = null,
     val httpUserAgent: String? = null, val httpReferer: String? = null,
     val itemKind: LibraryItemKind = LibraryItemKind.Media,
     val parentId: String? = null,

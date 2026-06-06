@@ -3,9 +3,9 @@ package com.selxo.rougo
 import android.content.Context
 import android.net.Uri
 import android.os.Environment
+import android.util.Log
 import java.io.File
 import java.io.IOException
-import java.net.URI
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -30,6 +30,7 @@ import org.schabi.newpipe.extractor.exceptions.PrivateContentException
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
 import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.playlist.PlaylistInfo
+import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper
 import org.schabi.newpipe.extractor.stream.AudioStream
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.Stream
@@ -37,17 +38,7 @@ import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
 import org.schabi.newpipe.extractor.stream.VideoStream
 
-internal enum class StreamProvider { YouTube, Bilibili, Niconico, Unknown }
-
-internal fun detectStreamProvider(url: String): StreamProvider {
-    val host = normalizedHost(url)
-    return when {
-        host == "youtu.be" || host.endsWith(".youtu.be") || host == "youtube.com" || host.endsWith(".youtube.com") -> StreamProvider.YouTube
-        host == "b23.tv" || host.endsWith(".b23.tv") || host == "bilibili.com" || host.endsWith(".bilibili.com") -> StreamProvider.Bilibili
-        host == "nico.ms" || host.endsWith(".nico.ms") || host == "nicovideo.jp" || host.endsWith(".nicovideo.jp") -> StreamProvider.Niconico
-        else -> StreamProvider.Unknown
-    }
-}
+private const val PIPEPIPE_TAG = "PipePipeExtractor"
 
 internal fun isPipePipeSupportedUrl(url: String): Boolean =
     normalizePipePipeStreamUrl(url) != null
@@ -66,6 +57,7 @@ internal fun fetchPipePipeFastStream(
         streamUrl = streamUrl,
         formatId = selected.formatId,
         isVideo = selected.vcodec != "none",
+        audioUrl = selected.audioUrl?.takeIf { it.isNotBlank() },
         httpUserAgent = setupData.httpUserAgent,
         httpReferer = setupData.httpReferer
     )
@@ -76,27 +68,65 @@ internal fun fetchPipePipeSetupData(context: Context, url: String): YoutubeSetup
     val normalizedUrl = normalizePipePipeStreamUrl(url)
         ?: throw IllegalArgumentException(context.getString(R.string.stream_error_unsupported_url))
     val service = pipePipeServiceForUrl(normalizedUrl)
+    Log.d(PIPEPIPE_TAG, "setup provider=${detectStreamProvider(normalizedUrl)} normalizedUrl=$normalizedUrl service=${service.serviceInfo.name}")
     val extractor = service.getStreamExtractor(normalizedUrl)
-    val info = StreamInfo.getInfo(extractor)
+    val info = try {
+        StreamInfo.getInfo(extractor)
+    } catch (t: Throwable) {
+        Log.w(
+            PIPEPIPE_TAG,
+            "extraction failed provider=${detectStreamProvider(normalizedUrl)} normalizedUrl=$normalizedUrl " +
+                "service=${service.serviceInfo.name} error=${t::class.java.simpleName}: ${t.localizedMessage}",
+            t
+        )
+        throw t
+    }
+    Log.d(
+        PIPEPIPE_TAG,
+        "result provider=${detectStreamProvider(normalizedUrl)} type=${info.streamType} " +
+            "video=${info.videoStreams.orEmpty().size} videoOnly=${info.videoOnlyStreams.orEmpty().size} " +
+            "audio=${info.audioStreams.orEmpty().size} hls=${!info.hlsUrl.isNullOrBlank()} dash=${!info.dashMpdUrl.isNullOrBlank()}"
+    )
     val subtitles = runCatching { extractor.getSubtitles(MediaFormat.VTT) }
         .getOrElse { runCatching { extractor.getSubtitles(MediaFormat.SRT) }.getOrDefault(info.subtitles.orEmpty()) }
     return setupDataFromStreamInfo(context, normalizedUrl, info, subtitles)
 }
 
 internal fun resolvePipePipeStreamUrl(context: Context, url: String, formatId: String?): String? {
+    return resolvePipePipeStreamMedia(context, url, formatId)?.mediaUrl
+}
+
+internal fun resolvePipePipeStreamMedia(context: Context, url: String, formatId: String?): ResolvedStreamMedia? {
     val normalizedUrl = normalizePipePipeStreamUrl(url) ?: return null
-    StreamUrlCache.get(context, normalizedUrl, formatId)?.let { return it }
+    StreamUrlCache.getMedia(context, normalizedUrl, formatId)?.let {
+        Log.d(PIPEPIPE_TAG, "cache hit provider=${detectStreamProvider(normalizedUrl)} formatId=${formatId.orEmpty()} audio=${!it.audioUrl.isNullOrBlank()}")
+        return ResolvedStreamMedia(it.streamUrl, it.audioUrl)
+    }
     return runCatching {
         val setup = fetchPipePipeSetupData(context, normalizedUrl)
         val format = setup.formats.firstOrNull { it.formatId == formatId }
             ?: selectPreferredYoutubeFormat(setup.formats, DEFAULT_YOUTUBE_RESOLUTION)
             ?: setup.formats.firstOrNull()
-        format?.playbackUrl() ?: setup.fallbackUrl
+        val resolvedUrl = format?.playbackUrl() ?: setup.fallbackUrl ?: return@runCatching null
+        Log.d(
+            PIPEPIPE_TAG,
+            "selected provider=${detectStreamProvider(normalizedUrl)} formatId=${format?.formatId.orEmpty()} " +
+                "height=${format?.height ?: 0} vcodec=${format?.vcodec.orEmpty()} acodec=${format?.acodec.orEmpty()} " +
+                "audio=${!format?.audioUrl.isNullOrBlank()} protocol=${format?.protocol.orEmpty()}"
+        )
+        ResolvedStreamMedia(resolvedUrl, format?.audioUrl?.takeIf { it.isNotBlank() })
     }.onFailure {
         CrashReporter.recordHandled(context, "PipePipe stream URL", it)
     }.getOrNull()
-        ?.also { resolvedUrl ->
-            StreamUrlCache.put(context, normalizedUrl, formatId, resolvedUrl, detectStreamProvider(normalizedUrl))
+        ?.also { resolved ->
+            StreamUrlCache.put(
+                context = context,
+                sourceUrl = normalizedUrl,
+                formatId = formatId,
+                streamUrl = resolved.mediaUrl,
+                audioUrl = resolved.audioUrl,
+                provider = detectStreamProvider(normalizedUrl)
+            )
         }
 }
 
@@ -200,18 +230,6 @@ internal fun downloadPipePipeSubtitle(
     }.getOrNull()
 }
 
-internal fun YoutubeStreamFormat.playbackUrl(): String? {
-    val manifest = manifestUrl?.takeIf { it.isNotBlank() }
-    val directUrl = url?.takeIf { it.isNotBlank() }
-    val protocolValue = protocol?.lowercase(Locale.US).orEmpty()
-    return when {
-        protocolValue.contains("hls") || protocolValue.contains("m3u8") -> directUrl ?: manifest
-        protocolValue.contains("dash") -> manifest ?: directUrl
-        isVlcFriendlyVideoFormat() || isVlcFriendlyAudioFormat() -> directUrl ?: manifest
-        else -> directUrl ?: manifest
-    }
-}
-
 private object PipePipeRuntime {
     private val downloader = PipePipeOkHttpDownloader()
 
@@ -223,6 +241,7 @@ private object PipePipeRuntime {
         synchronized(this) {
             if (!initialized) {
                 NewPipe.init(downloader, Localization.DEFAULT)
+                YoutubeParsingHelper.setConsentAccepted(true)
                 initialized = true
             }
         }
@@ -253,13 +272,26 @@ private fun setupDataFromStreamInfo(
     info: StreamInfo,
     subtitles: List<SubtitlesStream>
 ): YoutubeSetupData {
-    val formats = buildList {
-        info.videoStreams.orEmpty().mapNotNullTo(this) { it.toYoutubeStreamFormat() }
-        info.videoOnlyStreams.orEmpty().mapNotNullTo(this) { it.toYoutubeStreamFormat() }
-        info.audioStreams.orEmpty().mapNotNullTo(this) { it.toYoutubeStreamFormat() }
+    val muxedVideoFormats = info.videoStreams.orEmpty().mapNotNull { it.toYoutubeStreamFormat() }
+    val videoOnlyFormats = info.videoOnlyStreams.orEmpty().mapNotNull { it.toYoutubeStreamFormat() }
+    val audioFormats = info.audioStreams.orEmpty().mapNotNull { it.toYoutubeStreamFormat() }
+    val manifestFormats = buildList {
         addManifestFormat("hls", info.hlsUrl, "m3u8", "hls")
         addManifestFormat("dash", info.dashMpdUrl, "mpd", "dash")
-    }.distinctBy { "${it.formatId}:${it.url}:${it.manifestUrl}:${it.height}:${it.vcodec}:${it.acodec}" }
+    }
+    val formats = mergePipePipeStreamFormats(
+        muxedVideoFormats = muxedVideoFormats,
+        videoOnlyFormats = videoOnlyFormats,
+        audioFormats = audioFormats,
+        manifestFormats = manifestFormats
+    )
+    val pairedVideoCount = formats.count { it.vcodec != "none" && it.hasSeparateAudioStream() }
+    Log.d(
+        PIPEPIPE_TAG,
+        "mapped provider=${detectStreamProvider(sourceUrl)} muxed=${muxedVideoFormats.size} " +
+            "pairedVideo=$pairedVideoCount " +
+            "audio=${audioFormats.size} manifest=${manifestFormats.size} total=${formats.size}"
+    )
     val fallback = formats.firstNotNullOfOrNull { it.playbackUrl() } ?: info.hlsUrl ?: info.dashMpdUrl
     return YoutubeSetupData(
         title = cleanExtractorTitle(context, info.name, sourceUrl),
@@ -401,13 +433,6 @@ private fun resolutionHeight(resolution: String?): Int {
     return resolution
         ?.let { Regex("(\\d{3,4})p").find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
         ?: 0
-}
-
-private fun normalizedHost(url: String): String {
-    return runCatching { URI(url).host.orEmpty() }
-        .getOrElse { runCatching { URI("https://$url").host.orEmpty() }.getOrDefault("") }
-        .lowercase(Locale.US)
-        .removePrefix("www.")
 }
 
 private const val DEFAULT_PIPEPIPE_USER_AGENT =

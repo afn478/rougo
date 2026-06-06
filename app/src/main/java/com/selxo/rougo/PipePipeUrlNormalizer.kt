@@ -96,6 +96,9 @@ private fun parseLenientUri(rawUrl: String): URI? {
     val trimmed = rawUrl.trim()
     if (trimmed.isBlank()) return null
     return runCatching { URI(trimmed) }
+        .mapCatching { parsed ->
+            if (!parsed.host.isNullOrBlank()) parsed else URI("https://$trimmed")
+        }
         .getOrElse {
             runCatching { URI("https://$trimmed") }.getOrNull()
         }

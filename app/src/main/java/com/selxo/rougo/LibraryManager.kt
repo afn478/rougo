@@ -71,6 +71,7 @@ class LibraryManager(context: Context) {
                         genre = obj.optCleanString("genre"),
                         year = obj.optCleanString("year"),
                         coverArtPath = obj.optCleanString("coverArtPath"),
+                        streamAudioUri = obj.optCleanString("streamAudioUri"),
                         httpUserAgent = obj.optCleanString("httpUserAgent"),
                         httpReferer = obj.optCleanString("httpReferer"),
                         itemKind = itemKind,
@@ -123,6 +124,7 @@ class LibraryManager(context: Context) {
         obj.put("artist", item.artist ?: ""); obj.put("album", item.album ?: "")
         obj.put("albumArtist", item.albumArtist ?: ""); obj.put("genre", item.genre ?: "")
         obj.put("year", item.year ?: ""); obj.put("coverArtPath", item.coverArtPath ?: "")
+        obj.put("streamAudioUri", item.streamAudioUri ?: "")
         obj.put("httpUserAgent", item.httpUserAgent ?: ""); obj.put("httpReferer", item.httpReferer ?: "")
         obj.put("itemKind", item.itemKind.name); obj.put("parentId", item.parentId ?: "")
         obj.put("playlistSourceUrl", item.playlistSourceUrl ?: "")

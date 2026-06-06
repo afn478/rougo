@@ -28,6 +28,10 @@ class PipePipeMediaExtractorTest {
         )
         assertEquals(
             "https://www.youtube.com/watch?v=EIlIbE9HuB4",
+            normalizePipePipeStreamUrl("https://www.youtube.com/watch?v=EIlIbE9HuB4")
+        )
+        assertEquals(
+            "https://www.youtube.com/watch?v=EIlIbE9HuB4",
             normalizePipePipeStreamUrl("https://m.youtube.com/watch?v=EIlIbE9HuB4&feature=share&si=abc")
         )
         assertEquals(
@@ -77,21 +81,28 @@ class PipePipeMediaExtractorTest {
     }
 
     @Test
-    fun videoOnlyFormatsArePreferredOverAudioOnlyWhenNoCombinedVideoExists() {
-        val selected = selectPreferredYoutubeFormat(
-            formats = listOf(
-                YoutubeStreamFormat(
-                    formatId = "audio",
-                    formatNote = "audio",
-                    ext = "m4a",
-                    vcodec = "none",
-                    acodec = "mp4a",
-                    height = 0,
-                    tbr = 128,
-                    url = "https://stream.example/audio.m4a",
-                    manifestUrl = null,
-                    protocol = "http"
-                ),
+    fun videoOnlyFormatsArePairedWithBestAudioBeforeSelection() {
+        val audioLow = YoutubeStreamFormat(
+            formatId = "audio-low",
+            formatNote = "64k",
+            ext = "m4a",
+            vcodec = "none",
+            acodec = "mp4a",
+            height = 0,
+            tbr = 64,
+            url = "https://stream.example/audio-low.m4a",
+            manifestUrl = null,
+            protocol = "http"
+        )
+        val audioHigh = audioLow.copy(
+            formatId = "audio-high",
+            formatNote = "128k",
+            tbr = 128,
+            url = "https://stream.example/audio-high.m4a"
+        )
+        val mapped = mergePipePipeStreamFormats(
+            muxedVideoFormats = emptyList(),
+            videoOnlyFormats = listOf(
                 YoutubeStreamFormat(
                     formatId = "video-720",
                     formatNote = "720p",
@@ -105,9 +116,17 @@ class PipePipeMediaExtractorTest {
                     protocol = "http"
                 )
             ),
+            audioFormats = listOf(audioLow, audioHigh),
+            manifestFormats = emptyList()
+        )
+        val selected = selectPreferredYoutubeFormat(
+            formats = mapped,
             preferredResolution = "720"
         )
 
         assertEquals("video-720", selected?.formatId)
+        assertEquals("audio-high", selected?.audioFormatId)
+        assertEquals("https://stream.example/audio-high.m4a", selected?.audioUrl)
+        assertNotEquals("none", selected?.acodec)
     }
 }

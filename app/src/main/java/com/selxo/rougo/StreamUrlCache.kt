@@ -11,7 +11,8 @@ private const val STREAM_URL_CACHE_OTHER_TTL_MS = 20L * 60L * 1000L
 
 internal data class CachedStreamUrl(
     val streamUrl: String,
-    val expiresAtMs: Long
+    val expiresAtMs: Long,
+    val audioUrl: String? = null
 )
 
 internal fun isValidCachedStreamUrl(entry: CachedStreamUrl, nowMs: Long): Boolean {
@@ -30,6 +31,10 @@ internal fun streamUrlCacheExpiryMs(provider: StreamProvider, nowMs: Long): Long
 
 internal object StreamUrlCache {
     fun get(context: Context, sourceUrl: String, formatId: String?, nowMs: Long = System.currentTimeMillis()): String? {
+        return getMedia(context, sourceUrl, formatId, nowMs)?.streamUrl
+    }
+
+    fun getMedia(context: Context, sourceUrl: String, formatId: String?, nowMs: Long = System.currentTimeMillis()): CachedStreamUrl? {
         val key = cacheKey(sourceUrl, formatId)
         val entry = readEntry(context, key)
         if (entry == null) {
@@ -40,7 +45,7 @@ internal object StreamUrlCache {
             remove(context, key)
             return null
         }
-        return entry.streamUrl
+        return entry
     }
 
     fun put(
@@ -48,13 +53,15 @@ internal object StreamUrlCache {
         sourceUrl: String,
         formatId: String?,
         streamUrl: String,
+        audioUrl: String? = null,
         provider: StreamProvider = detectStreamProvider(sourceUrl),
         nowMs: Long = System.currentTimeMillis()
     ) {
         val cleanedUrl = streamUrl.trim().takeIf { it.isNotBlank() } ?: return
         val entry = CachedStreamUrl(
             streamUrl = cleanedUrl,
-            expiresAtMs = streamUrlCacheExpiryMs(provider, nowMs)
+            expiresAtMs = streamUrlCacheExpiryMs(provider, nowMs),
+            audioUrl = audioUrl?.trim()?.takeIf { it.isNotBlank() }
         )
         prefs(context).edit {
             putString(cacheKey(sourceUrl, formatId), entry.toJson().toString())
@@ -71,7 +78,8 @@ internal object StreamUrlCache {
             val json = JSONObject(raw)
             CachedStreamUrl(
                 streamUrl = json.optString("streamUrl"),
-                expiresAtMs = json.optLong("expiresAtMs", 0L)
+                expiresAtMs = json.optLong("expiresAtMs", 0L),
+                audioUrl = json.optString("audioUrl").takeIf { it.isNotBlank() }
             )
         }.getOrNull()
     }
@@ -91,5 +99,6 @@ internal object StreamUrlCache {
         return JSONObject()
             .put("streamUrl", streamUrl)
             .put("expiresAtMs", expiresAtMs)
+            .put("audioUrl", audioUrl ?: "")
     }
 }
