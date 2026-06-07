@@ -803,6 +803,7 @@ fun PlayerScreen(initialLibraryItem: LibraryItem, onBack: (LibraryItem) -> Unit)
                                 isRefreshingStream = true
                                 val refreshedUri = withContext(Dispatchers.IO) {
                                     try {
+                                        invalidateResolvedStreamUrl(context, sourceUrl, libraryItem.formatId)
                                         resolveYoutubeStreamUrl(context, sourceUrl, libraryItem.formatId)
                                     } catch (e: Exception) {
                                         e.printStackTrace()
