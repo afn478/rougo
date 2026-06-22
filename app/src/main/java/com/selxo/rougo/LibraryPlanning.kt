@@ -20,6 +20,22 @@ internal sealed class LibraryDisplayRow {
     data class Media(val item: LibraryItem, val isPlaylistChild: Boolean) : LibraryDisplayRow()
 }
 
+internal fun buildLibraryFolder(
+    folderTitle: String,
+    nextId: () -> String
+): LibraryItem {
+    return LibraryItem(
+        id = nextId(),
+        title = folderTitle.ifBlank { "Folder" },
+        mediaUri = "",
+        subtitleUri = null,
+        progress = 0L,
+        duration = 0L,
+        isVideo = false,
+        itemKind = LibraryItemKind.Folder
+    )
+}
+
 internal fun buildPlaylistImportPlan(
     playlistTitle: String,
     playlistUrl: String,
@@ -37,7 +53,7 @@ internal fun buildPlaylistImportPlan(
         isVideo = true,
         sourceUrl = playlistUrl,
         playlistSourceUrl = playlistUrl,
-        itemKind = LibraryItemKind.Playlist
+        itemKind = LibraryItemKind.Folder
     )
     val children = entries.mapIndexed { index, entry ->
         LibraryItem(
@@ -50,7 +66,6 @@ internal fun buildPlaylistImportPlan(
             isVideo = entry.isVideo,
             sourceUrl = entry.sourceUrl,
             formatId = entry.formatId,
-            coverArtPath = entry.thumbnailUrl,
             parentId = groupId,
             playlistSourceUrl = playlistUrl,
             playlistItemIndex = index
@@ -66,8 +81,7 @@ internal fun libraryDisplayRows(
     sortMode: String
 ): List<LibraryDisplayRow> {
     val query = searchQuery.trim().lowercase(Locale.US)
-    val groups = items.filter { it.isPlaylistGroup() }
-    val media = items.filter { !it.isPlaylistGroup() }
+    val media = items.filter { !it.isFolderGroup() }
     val mediaByParent = media.groupBy { it.parentId }
     val visibleTopLevelMediaIds = filterLibraryMediaItems(mediaByParent[null].orEmpty(), query, selectedFilter)
         .map { it.id }
@@ -75,7 +89,7 @@ internal fun libraryDisplayRows(
     val rows = mutableListOf<LibraryDisplayRow>()
 
     sortLibraryTopLevelItems(items.filter { it.parentId == null }, sortMode).forEach { topLevelItem ->
-        if (topLevelItem.isPlaylistGroup()) {
+        if (topLevelItem.isFolderGroup()) {
             val children = sortLibraryMediaItems(
                 filterLibraryMediaItems(mediaByParent[topLevelItem.id].orEmpty(), query, selectedFilter),
                 sortMode,
@@ -97,7 +111,7 @@ internal fun libraryDisplayRows(
 }
 
 internal fun libraryMediaItemCount(items: List<LibraryItem>): Int =
-    items.count { !it.isPlaylistGroup() }
+    items.count { !it.isFolderGroup() }
 
 internal fun persistableMediaUriForStorage(
     sourceUrl: String?,
@@ -125,10 +139,10 @@ private fun matchesLibraryQuery(item: LibraryItem, query: String): Boolean {
 
 private fun matchesLibraryFilter(item: LibraryItem, selectedFilter: String): Boolean {
     return when (selectedFilter) {
-        "Audio" -> !item.isPlaylistGroup() && !item.isVideo
-        "Video" -> !item.isPlaylistGroup() && item.isVideo
+        "Audio" -> !item.isFolderGroup() && !item.isVideo
+        "Video" -> !item.isFolderGroup() && item.isVideo
         "YouTube" -> item.sourceUrl != null || item.playlistSourceUrl != null
-        "Local" -> !item.isPlaylistGroup() && item.sourceUrl == null
+        "Local" -> !item.isFolderGroup() && item.sourceUrl == null
         else -> true
     }
 }
@@ -153,7 +167,7 @@ private fun sortLibraryTopLevelItems(items: List<LibraryItem>, sortMode: String)
     return when (sortMode) {
         "Title" -> items.sortedBy { it.title.lowercase(Locale.US) }
         "Progress" -> items.sortedByDescending {
-            if (it.isPlaylistGroup()) 0f else if (it.duration > 0L) it.progress.toFloat() / it.duration.toFloat() else 0f
+            if (it.isFolderGroup()) 0f else if (it.duration > 0L) it.progress.toFloat() / it.duration.toFloat() else 0f
         }
         "Recordings" -> items.sortedByDescending { it.recordings.size }
         else -> items

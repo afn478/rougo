@@ -209,6 +209,7 @@ fun LibraryCard(
     item: LibraryItem,
     onClick: () -> Unit,
     onDelete: () -> Unit,
+    onMove: (() -> Unit)? = null,
     onDownload: (() -> Unit)? = null,
     onDeleteDownload: (() -> Unit)? = null,
     downloadState: LibraryDownloadState = LibraryDownloadState.Idle,
@@ -297,8 +298,13 @@ fun LibraryCard(
             Column(
                 modifier = Modifier.width(48.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (onMove != null) {
+                    IconButton(onClick = onMove, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Default.Folder, contentDescription = stringResource(R.string.common_move), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.common_delete), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

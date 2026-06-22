@@ -18,7 +18,7 @@ class LibraryPlanningTest {
             nextId = { "id-${next++}" }
         )
 
-        assertEquals(LibraryItemKind.Playlist, plan.group.itemKind)
+        assertEquals(LibraryItemKind.Folder, plan.group.itemKind)
         assertEquals("id-0", plan.group.id)
         assertEquals(listOf("id-1", "id-2"), plan.children.map { it.id })
         assertTrue(plan.children.all { it.parentId == plan.group.id })
@@ -50,6 +50,34 @@ class LibraryPlanningTest {
 
         assertEquals(
             listOf("single", plan.group.id, plan.children[0].id, plan.children[1].id),
+            rows.map {
+                when (it) {
+                    is LibraryDisplayRow.PlaylistGroup -> it.item.id
+                    is LibraryDisplayRow.Media -> it.item.id
+                }
+            }
+        )
+    }
+
+    @Test
+    fun manualFoldersGroupMovedMediaWithoutCountingAsMedia() {
+        val folder = buildLibraryFolder("Drama clips") { "folder-1" }
+        val child = LibraryItem(
+            id = "clip-1",
+            title = "Clip",
+            mediaUri = "file:///clip.mp4",
+            subtitleUri = null,
+            progress = 0L,
+            duration = 0L,
+            isVideo = true,
+            parentId = folder.id
+        )
+
+        val rows = libraryDisplayRows(listOf(folder, child), "", "All", "Recent")
+
+        assertEquals(1, libraryMediaItemCount(listOf(folder, child)))
+        assertEquals(
+            listOf(folder.id, child.id),
             rows.map {
                 when (it) {
                     is LibraryDisplayRow.PlaylistGroup -> it.item.id

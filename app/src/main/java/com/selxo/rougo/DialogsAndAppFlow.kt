@@ -176,20 +176,34 @@ fun MainAppFlow(
     var manualVideoUrl by remember { mutableStateOf<String?>(null) }
 
     val pendingVideoUrl = sharedUrl ?: manualVideoUrl
+    fun clearPendingVideoUrl() {
+        if (sharedUrl != null) onSharedUrlProcessed() else manualVideoUrl = null
+    }
     if (pendingVideoUrl != null) {
-        YtStreamDialog(
-            url = pendingVideoUrl,
-            onDismiss = {
-                if (sharedUrl != null) onSharedUrlProcessed() else manualVideoUrl = null
-            },
-            onComplete = { newItem ->
-                libraryManager.saveItem(newItem)
-                libraryItems = libraryManager.getItems()
-                if (sharedUrl != null) onSharedUrlProcessed() else manualVideoUrl = null
-                activeItem = newItem
-                currentScreen = AppScreen.Player
-            }
-        )
+        if (isYoutubePlaylistUrl(pendingVideoUrl)) {
+            PlaylistImportDialog(
+                url = pendingVideoUrl,
+                onDismiss = { clearPendingVideoUrl() },
+                onComplete = { importedItems ->
+                    libraryManager.saveItems(importedItems)
+                    libraryItems = libraryManager.getItems()
+                    clearPendingVideoUrl()
+                    currentScreen = AppScreen.Library
+                }
+            )
+        } else {
+            YtStreamDialog(
+                url = pendingVideoUrl,
+                onDismiss = { clearPendingVideoUrl() },
+                onComplete = { newItem ->
+                    libraryManager.saveItem(newItem)
+                    libraryItems = libraryManager.getItems()
+                    clearPendingVideoUrl()
+                    activeItem = newItem
+                    currentScreen = AppScreen.Player
+                }
+            )
+        }
     }
 
     if (currentScreen == AppScreen.Library) {
@@ -239,6 +253,53 @@ fun MainAppFlow(
             )
         }
     }
+}
+@Composable
+fun PlaylistImportDialog(url: String, onDismiss: () -> Unit, onComplete: (List<LibraryItem>) -> Unit) {
+    val context = LocalContext.current
+    var status by remember { mutableStateOf(context.getString(R.string.library_importing_playlist)) }
+    var isProcessing by remember { mutableStateOf(true) }
+
+    LaunchedEffect(url) {
+        try {
+            val importedItems = withContext(Dispatchers.IO) {
+                val playlist = fetchYoutubePlaylistImportData(context, url)
+                    ?: error(context.getString(R.string.library_playlist_import_failed_toast))
+                val plan = buildPlaylistImportPlan(
+                    playlistTitle = playlist.title,
+                    playlistUrl = url,
+                    entries = playlist.entries,
+                    nextId = { java.util.UUID.randomUUID().toString() }
+                )
+                listOf(plan.group) + plan.children
+            }
+            onComplete(importedItems)
+        } catch (e: Exception) {
+            isProcessing = false
+            status = context.getString(R.string.stream_failed_status, e.localizedMessage.orEmpty())
+            delay(3000)
+            onDismiss()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!isProcessing) onDismiss() },
+        title = { Text(stringResource(R.string.library_import_playlist_title), fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                Spacer(Modifier.height(16.dp))
+                if (isProcessing) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+        },
+        confirmButton = {
+            if (isProcessing) {
+                Button(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+            }
+        }
+    )
 }
 @Composable
 fun YtStreamDialog(url: String, onDismiss: () -> Unit, onComplete: (LibraryItem) -> Unit) {

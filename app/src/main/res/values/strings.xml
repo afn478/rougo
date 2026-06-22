@@ -23,6 +23,9 @@
     <string name="common_settings">Settings</string>
     <string name="common_help">Help</string>
     <string name="common_add">Add</string>
+    <string name="common_create">Create</string>
+    <string name="common_rename">Rename</string>
+    <string name="common_move">Move</string>
     <string name="common_stream">Stream</string>
     <string name="common_video">Video</string>
     <string name="common_audio">Audio</string>
@@ -40,6 +43,18 @@
     <string name="library_expand_controls">Expand library controls</string>
     <string name="library_stream_or_download_link">Stream or download video link</string>
     <string name="library_browse_youtube">Browse YouTube</string>
+    <string name="library_new_folder">New folder</string>
+    <string name="library_create_folder_title">Create Folder</string>
+    <string name="library_rename_folder_title">Rename Folder</string>
+    <string name="library_folder_name_label">Folder name</string>
+    <string name="library_move_to_folder_title">Move to Folder</string>
+    <string name="library_move_no_folder">No folder</string>
+    <string name="library_created_folder_toast">Folder created.</string>
+    <string name="library_moved_item_toast">Moved item.</string>
+    <string name="library_import_playlist_title">Import Playlist</string>
+    <string name="library_importing_playlist">Importing playlist...</string>
+    <string name="library_playlist_imported_toast">Playlist imported.</string>
+    <string name="library_playlist_import_failed_toast">Playlist import failed.</string>
     <string name="library_filter_all">All</string>
     <string name="library_filter_audio">Audio</string>
     <string name="library_filter_video">Video</string>
@@ -67,6 +82,7 @@
     <string name="library_url_placeholder">https://...</string>
     <string name="library_recordings_count">%1$d recordings</string>
     <string name="library_playlist_items_count">%1$d videos</string>
+    <string name="library_folder_items_count">%1$d items</string>
     <string name="library_progress_percent">%1$d%%</string>
     <string name="library_has_subtitles">Subtitles</string>
     <string name="library_no_subtitles">No subtitles</string>
@@ -76,6 +92,7 @@
     <string name="media_source_audio">Audio</string>
     <string name="media_source_video">Video</string>
     <string name="media_source_stream">Stream</string>
+    <string name="media_source_folder">Folder</string>
     <string name="media_source_playlist">Playlist</string>
     <string name="media_source_youtube">YouTube</string>
     <string name="media_source_bilibili">Bilibili</string>

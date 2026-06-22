@@ -75,8 +75,15 @@ private fun LibraryControlsCollapseHandle(
 private fun LibraryPlaylistGroupCard(
     item: LibraryItem,
     childCount: Int,
+    onRename: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val countLabel = if (item.playlistSourceUrl != null || item.itemKind == LibraryItemKind.Playlist) {
+        stringResource(R.string.library_playlist_items_count, childCount)
+    } else {
+        stringResource(R.string.library_folder_items_count, childCount)
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -111,10 +118,17 @@ private fun LibraryPlaylistGroupCard(
                 AssistChip(
                     onClick = {},
                     enabled = false,
-                    label = { Text(stringResource(R.string.library_playlist_items_count, childCount), fontSize = 11.sp) },
+                    label = { Text(countLabel, fontSize = 11.sp) },
                     leadingIcon = {
                         Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null, modifier = Modifier.size(14.dp))
                     }
+                )
+            }
+            IconButton(onClick = onRename, modifier = Modifier.size(44.dp)) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = stringResource(R.string.common_rename),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
@@ -146,6 +160,10 @@ fun LibraryScreen(
     val deleteDownloadFailedToast = stringResource(R.string.library_delete_download_failed_toast)
     val downloadedVideoToast = stringResource(R.string.library_downloaded_video_toast)
     val downloadFailedToast = stringResource(R.string.library_download_failed_toast)
+    val createdFolderToast = stringResource(R.string.library_created_folder_toast)
+    val movedItemToast = stringResource(R.string.library_moved_item_toast)
+    val importedPlaylistToast = stringResource(R.string.library_playlist_imported_toast)
+    val playlistImportFailedToast = stringResource(R.string.library_playlist_import_failed_toast)
     val filterOptions = remember {
         listOf(
             "All" to R.string.library_filter_all,
@@ -178,6 +196,11 @@ fun LibraryScreen(
     var showHelpDialog by remember { mutableStateOf(false) }
     var linkText by remember { mutableStateOf("") }
     var isDownloadingLink by remember { mutableStateOf(false) }
+    var showCreateFolderDialog by remember { mutableStateOf(false) }
+    var folderTitleText by remember { mutableStateOf("") }
+    var renameFolderItem by remember { mutableStateOf<LibraryItem?>(null) }
+    var renameFolderTitle by remember { mutableStateOf("") }
+    var moveTargetItem by remember { mutableStateOf<LibraryItem?>(null) }
     var pendingDeleteItem by remember { mutableStateOf<LibraryItem?>(null) }
     var libraryControlsExpanded by remember { mutableStateOf(true) }
     val downloadStates = remember { mutableStateMapOf<String, LibraryDownloadState>() }
@@ -191,6 +214,7 @@ fun LibraryScreen(
     val displayRows = remember(items, searchQuery, selectedFilter, sortMode) {
         libraryDisplayRows(items, searchQuery, selectedFilter, sortMode)
     }
+    val folderItems = remember(items) { items.filter { it.isFolderGroup() } }
 
     val totalRecordings = remember(items) { items.sumOf { it.recordings.size } }
     val inProgressCount = remember(items) { items.count { it.duration > 0L && it.progress > 0L } }
@@ -245,6 +269,52 @@ fun LibraryScreen(
             pendingMediaUri = null
             pendingTitle = ""
             onRefresh()
+        }
+    }
+
+    fun createFolder() {
+        val title = folderTitleText.trim()
+        if (title.isBlank()) return
+
+        libraryManager.saveItem(
+            buildLibraryFolder(
+                folderTitle = title,
+                nextId = { UUID.randomUUID().toString() }
+            )
+        )
+        folderTitleText = ""
+        showCreateFolderDialog = false
+        onRefresh()
+        Toast.makeText(context, createdFolderToast, Toast.LENGTH_SHORT).show()
+    }
+
+    fun importYoutubePlaylist(url: String) {
+        if (isDownloadingLink) return
+        isDownloadingLink = true
+        importScope.launch {
+            val plan = withContext(Dispatchers.IO) {
+                runCatching {
+                    fetchYoutubePlaylistImportData(context, url)?.let { playlist ->
+                        buildPlaylistImportPlan(
+                            playlistTitle = playlist.title,
+                            playlistUrl = url,
+                            entries = playlist.entries,
+                            nextId = { UUID.randomUUID().toString() }
+                        )
+                    }
+                }.getOrNull()
+            }
+
+            if (plan != null) {
+                libraryManager.saveItems(listOf(plan.group) + plan.children)
+                onRefresh()
+                Toast.makeText(context, importedPlaylistToast, Toast.LENGTH_SHORT).show()
+                showLinkDialog = false
+                linkText = ""
+            } else {
+                Toast.makeText(context, playlistImportFailedToast, Toast.LENGTH_LONG).show()
+            }
+            isDownloadingLink = false
         }
     }
 
@@ -346,6 +416,18 @@ fun LibraryScreen(
                     Text(stringResource(R.string.library_browse_youtube))
                 }
 
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = { showCreateFolderDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.library_new_folder))
+                }
+
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
@@ -429,6 +511,10 @@ fun LibraryScreen(
                             LibraryPlaylistGroupCard(
                                 item = row.item,
                                 childCount = row.childCount,
+                                onRename = {
+                                    renameFolderItem = row.item
+                                    renameFolderTitle = row.item.title
+                                },
                                 onDelete = { requestDeleteItem(row.item) }
                             )
                             return@items
@@ -449,6 +535,11 @@ fun LibraryScreen(
                             item = item,
                             onClick = { onItemClick(item) },
                             onDelete = { requestDeleteItem(item) },
+                            onMove = if (folderItems.isNotEmpty() || item.parentId != null) {
+                                { moveTargetItem = item }
+                            } else {
+                                null
+                            },
                             downloadState = downloadState,
                             modifier = if (row.isPlaylistChild) Modifier.padding(start = 18.dp) else Modifier,
 
@@ -556,7 +647,121 @@ fun LibraryScreen(
         )
     }
 
+    if (showCreateFolderDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateFolderDialog = false },
+            title = { Text(stringResource(R.string.library_create_folder_title)) },
+            text = {
+                OutlinedTextField(
+                    value = folderTitleText,
+                    onValueChange = { folderTitleText = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.library_folder_name_label)) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { createFolder() },
+                    enabled = folderTitleText.trim().isNotEmpty()
+                ) { Text(stringResource(R.string.common_create)) }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showCreateFolderDialog = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+
+    renameFolderItem?.let { folder ->
+        AlertDialog(
+            onDismissRequest = { renameFolderItem = null },
+            title = { Text(stringResource(R.string.library_rename_folder_title)) },
+            text = {
+                OutlinedTextField(
+                    value = renameFolderTitle,
+                    onValueChange = { renameFolderTitle = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.library_folder_name_label)) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val title = renameFolderTitle.trim()
+                        if (title.isNotBlank()) {
+                            libraryManager.saveItem(folder.copy(title = title))
+                            renameFolderItem = null
+                            renameFolderTitle = ""
+                            onRefresh()
+                        }
+                    },
+                    enabled = renameFolderTitle.trim().isNotEmpty()
+                ) { Text(stringResource(R.string.common_rename)) }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { renameFolderItem = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+
+    moveTargetItem?.let { movingItem ->
+        AlertDialog(
+            onDismissRequest = { moveTargetItem = null },
+            title = { Text(stringResource(R.string.library_move_to_folder_title)) },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                    item {
+                        TextButton(
+                            onClick = {
+                                if (libraryManager.moveItemToFolder(movingItem.id, null)) {
+                                    onRefresh()
+                                    Toast.makeText(context, movedItemToast, Toast.LENGTH_SHORT).show()
+                                }
+                                moveTargetItem = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.LibraryMusic, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.library_move_no_folder))
+                        }
+                    }
+
+                    items(folderItems, key = { it.id }) { folder ->
+                        TextButton(
+                            onClick = {
+                                if (libraryManager.moveItemToFolder(movingItem.id, folder.id)) {
+                                    onRefresh()
+                                    Toast.makeText(context, movedItemToast, Toast.LENGTH_SHORT).show()
+                                }
+                                moveTargetItem = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(folder.title, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { moveTargetItem = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+
     if (showLinkDialog) {
+        val pendingUrl = extractFirstUrl(linkText)
+        val isPlaylistLink = pendingUrl?.let { isYoutubePlaylistUrl(it) } == true
+
         AlertDialog(
             onDismissRequest = { if (!isDownloadingLink) showLinkDialog = false },
             title = { Text(stringResource(R.string.library_add_video_link_title)) },
@@ -579,39 +784,50 @@ fun LibraryScreen(
             },
             confirmButton = {
                 Button(
-                    enabled = !isDownloadingLink && extractFirstUrl(linkText) != null,
+                    enabled = !isDownloadingLink && pendingUrl != null,
                     onClick = {
-                        val url = extractFirstUrl(linkText) ?: return@Button
-                        showLinkDialog = false
-                        linkText = ""
-                        onAddLink(url)
-                    }
-                ) { Text(stringResource(R.string.common_stream)) }
-            },
-            dismissButton = {
-                TextButton(
-                    enabled = !isDownloadingLink && extractFirstUrl(linkText) != null,
-                    onClick = {
-                        val url = extractFirstUrl(linkText) ?: return@TextButton
-                        requestDownloadNotificationPermissionIfNeeded()
-                        isDownloadingLink = true
-                        importScope.launch {
-                            val downloadedItem = withContext(Dispatchers.IO) {
-                                downloadVideoLinkToLibraryItem(context, url)
-                            }
-                            if (downloadedItem != null) {
-                                libraryManager.saveItem(downloadedItem)
-                                onRefresh()
-                                Toast.makeText(context, downloadedVideoToast, Toast.LENGTH_SHORT).show()
-                                showLinkDialog = false
-                                linkText = ""
-                            } else {
-                                Toast.makeText(context, downloadFailedToast, Toast.LENGTH_LONG).show()
-                            }
-                            isDownloadingLink = false
+                        val url = pendingUrl ?: return@Button
+                        if (isPlaylistLink) {
+                            importYoutubePlaylist(url)
+                        } else {
+                            showLinkDialog = false
+                            linkText = ""
+                            onAddLink(url)
                         }
                     }
-                ) { Text(stringResource(R.string.common_download)) }
+                ) { Text(stringResource(if (isPlaylistLink) R.string.common_import else R.string.common_stream)) }
+            },
+            dismissButton = {
+                if (isPlaylistLink) {
+                    TextButton(
+                        enabled = !isDownloadingLink,
+                        onClick = { showLinkDialog = false }
+                    ) { Text(stringResource(R.string.common_cancel)) }
+                } else {
+                    TextButton(
+                        enabled = !isDownloadingLink && pendingUrl != null,
+                        onClick = {
+                            val url = pendingUrl ?: return@TextButton
+                            requestDownloadNotificationPermissionIfNeeded()
+                            isDownloadingLink = true
+                            importScope.launch {
+                                val downloadedItem = withContext(Dispatchers.IO) {
+                                    downloadVideoLinkToLibraryItem(context, url)
+                                }
+                                if (downloadedItem != null) {
+                                    libraryManager.saveItem(downloadedItem)
+                                    onRefresh()
+                                    Toast.makeText(context, downloadedVideoToast, Toast.LENGTH_SHORT).show()
+                                    showLinkDialog = false
+                                    linkText = ""
+                                } else {
+                                    Toast.makeText(context, downloadFailedToast, Toast.LENGTH_LONG).show()
+                                }
+                                isDownloadingLink = false
+                            }
+                        }
+                    ) { Text(stringResource(R.string.common_download)) }
+                }
             }
         )
     }

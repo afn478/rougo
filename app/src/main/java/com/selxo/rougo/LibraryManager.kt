@@ -29,7 +29,7 @@ class LibraryManager(context: Context) {
                     LibraryItemKind.valueOf(obj.optString("itemKind", LibraryItemKind.Media.name))
                 }.getOrDefault(LibraryItemKind.Media)
                 val mediaUri = obj.optString("mediaUri").takeIf { it.isNotBlank() }
-                    ?: if (itemKind == LibraryItemKind.Playlist) "" else continue
+                    ?: if (itemKind != LibraryItemKind.Media) "" else continue
 
                 val recordingsList = mutableListOf<ShadowRecording>()
                 if (obj.has("recordings")) {
@@ -91,6 +91,41 @@ class LibraryManager(context: Context) {
         val index = current.indexOfFirst { it.id == item.id }
         if (index >= 0) current[index] = item else current.add(0, item)
         prefs.edit { putString("items", itemsToJson(current).toString()) }
+    }
+
+    fun saveItems(newItems: List<LibraryItem>) {
+        if (newItems.isEmpty()) return
+
+        val current = getItems()
+        val incomingById = newItems.associateBy { it.id }
+        val existingIds = current.map { it.id }.toSet()
+        val additions = newItems.filter { it.id !in existingIds }
+        val updated = current.map { incomingById[it.id] ?: it }
+        prefs.edit { putString("items", itemsToJson(additions + updated).toString()) }
+    }
+
+    fun moveItemToFolder(itemId: String, targetFolderId: String?): Boolean {
+        val items = getItems()
+        if (targetFolderId != null && items.none { it.id == targetFolderId && it.isFolderGroup() }) {
+            return false
+        }
+        val nextIndex = items.filter { it.parentId == targetFolderId }
+            .maxOfOrNull { it.playlistItemIndex }
+            ?.plus(1)
+            ?: 0
+        var changed = false
+        val updatedItems = items.map { item ->
+            if (item.id == itemId && !item.isFolderGroup()) {
+                changed = changed || item.parentId != targetFolderId || item.playlistItemIndex != nextIndex
+                item.copy(parentId = targetFolderId, playlistItemIndex = nextIndex)
+            } else {
+                item
+            }
+        }
+        if (!changed) return false
+
+        prefs.edit { putString("items", itemsToJson(updatedItems).toString()) }
+        return true
     }
 
     fun deleteItem(id: String) {

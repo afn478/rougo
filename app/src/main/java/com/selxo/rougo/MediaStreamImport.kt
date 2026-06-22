@@ -79,6 +79,10 @@ internal data class FastYoutubeStream(
     val httpUserAgent: String? = null,
     val httpReferer: String? = null
 )
+internal data class YoutubePlaylistImportData(
+    val title: String,
+    val entries: List<PlaylistImportEntry>
+)
 private val mediaToolsInitLock = Any()
 @Volatile
 private var mediaToolsInitialized = false
@@ -113,6 +117,13 @@ internal fun ensureMediaToolsReady(context: Context): Boolean {
 internal fun isYoutubeUrl(url: String): Boolean {
     val host = runCatching { Uri.parse(url).host.orEmpty().lowercase(Locale.US) }.getOrDefault("")
     return host.contains("youtube.com") || host.contains("youtu.be")
+}
+internal fun isYoutubePlaylistUrl(url: String): Boolean {
+    if (!isYoutubeUrl(url)) return false
+    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+    val path = uri.path.orEmpty().lowercase(Locale.US)
+    val listId = uri.getQueryParameter("list")
+    return !listId.isNullOrBlank() || path.startsWith("/playlist")
 }
 internal fun playableYoutubeUrl(url: String): String? {
     val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return null
@@ -181,6 +192,23 @@ private fun addFastYoutubeOptions(context: Context, request: YoutubeDLRequest, s
         // iOS/Android clients bypass the Web JS challenge.
         // Skipping webpage, configs, and js stops yt-dlp from downloading heavy HTML/JS,
         // saving several more seconds by directly hitting the lightweight mobile API!
+        configured.addOption("--extractor-args", "youtube:player_client=ios,android;player_skip=webpage,configs,js")
+    }
+
+    return configured
+}
+private fun addYoutubePlaylistOptions(context: Context, request: YoutubeDLRequest, sourceUrl: String): YoutubeDLRequest {
+    val cacheDir = File(context.cacheDir, "yt-dlp-cache").apply { mkdirs() }
+    val configured = request
+        .addOption("--yes-playlist")
+        .addOption("--flat-playlist")
+        .addOption("--ignore-errors")
+        .addOption("--no-warnings")
+        .addOption("--no-progress")
+        .addOption("--force-ipv4")
+        .addOption("--cache-dir", cacheDir.absolutePath)
+
+    if (isYoutubeUrl(sourceUrl)) {
         configured.addOption("--extractor-args", "youtube:player_client=ios,android;player_skip=webpage,configs,js")
     }
 
@@ -307,7 +335,7 @@ internal fun youtubeBrowserInterceptScript(): String {
                     var path = url.pathname || "";
                     return ((host === "youtu.be" || host.endsWith(".youtu.be")) && path.length > 1) ||
                         (host.indexOf("youtube.com") !== -1 &&
-                            (url.searchParams.get("v") || /^\/(shorts|live|embed)\//.test(path)));
+                            (url.searchParams.get("v") || url.searchParams.get("list") || /^\/(shorts|live|embed|playlist)\//.test(path)));
                 } catch (e) {
                     return false;
                 }
@@ -391,6 +419,55 @@ internal fun fetchYoutubeSetupData(context: Context, url: String): YoutubeSetupD
         httpUserAgent = headers.first,
         httpReferer = headers.second
     )
+}
+internal fun fetchYoutubePlaylistImportData(context: Context, url: String): YoutubePlaylistImportData? {
+    if (!isYoutubePlaylistUrl(url)) return null
+    check(ensureMediaToolsReady(context)) { "Media tools are unavailable." }
+
+    val request = addYoutubePlaylistOptions(context, YoutubeDLRequest(url), url)
+    request.addOption("--dump-single-json")
+
+    val response = YoutubeDL.getInstance().execute(request, null, false)
+    return parseYoutubePlaylistImportData(JSONObject(extractDumpedJson(response.out)))
+        .takeIf { it.entries.isNotEmpty() }
+}
+internal fun parseYoutubePlaylistImportData(json: JSONObject): YoutubePlaylistImportData {
+    val title = firstCleanMetadataValue(
+        cleanYtdlpPrintedValue(json.optString("title")),
+        cleanYtdlpPrintedValue(json.optString("playlist_title"))
+    ) ?: "Playlist"
+    val entriesJson = json.optJSONArray("entries") ?: JSONArray()
+    val entries = mutableListOf<PlaylistImportEntry>()
+
+    for (index in 0 until entriesJson.length()) {
+        val entry = entriesJson.optJSONObject(index) ?: continue
+        val entryUrl = youtubePlaylistEntrySourceUrl(entry) ?: continue
+        val entryTitle = firstCleanMetadataValue(
+            cleanYtdlpPrintedValue(entry.optString("title")),
+            cleanYtdlpPrintedValue(entry.optString("fulltitle"))
+        ) ?: "Video ${entries.size + 1}"
+        entries += PlaylistImportEntry(
+            title = entryTitle,
+            sourceUrl = entryUrl,
+            thumbnailUrl = bestThumbnailUrl(entry),
+            isVideo = true
+        )
+    }
+
+    return YoutubePlaylistImportData(title, entries.distinctBy { it.sourceUrl })
+}
+private fun youtubePlaylistEntrySourceUrl(entry: JSONObject): String? {
+    val webpageUrl = cleanYtdlpPrintedValue(entry.optString("webpage_url"))
+    if (webpageUrl?.startsWith("http", ignoreCase = true) == true) return webpageUrl
+
+    val rawUrl = cleanYtdlpPrintedValue(entry.optString("url"))
+    if (rawUrl?.startsWith("http", ignoreCase = true) == true) return rawUrl
+
+    val id = cleanYtdlpPrintedValue(entry.optString("id"))
+        ?: rawUrl?.takeIf { Regex("[A-Za-z0-9_-]{6,}").matches(it) }
+        ?: return null
+
+    return "https://www.youtube.com/watch?v=$id"
 }
 private fun parseStreamHttpHeaders(json: JSONObject): Pair<String?, String?> {
     val headers = json.optJSONObject("http_headers")
@@ -966,7 +1043,11 @@ internal fun downloadVideoLinkToLibraryItem(context: Context, url: String, exist
                 ?: setupData?.thumbnailUrl?.let { downloadRemoteCover(context, itemId, it) }
                 ?: existingItem?.coverArtPath,
             httpUserAgent = existingItem?.httpUserAgent ?: setupData?.httpUserAgent,
-            httpReferer = existingItem?.httpReferer ?: setupData?.httpReferer
+            httpReferer = existingItem?.httpReferer ?: setupData?.httpReferer,
+            itemKind = existingItem?.itemKind ?: LibraryItemKind.Media,
+            parentId = existingItem?.parentId,
+            playlistSourceUrl = existingItem?.playlistSourceUrl,
+            playlistItemIndex = existingItem?.playlistItemIndex ?: 0
         )
         val mergedItem = mergeMetadataIntoItem(baseItem, metadata, fallbackTitle)
         showDownloadCompleteNotification(context, notificationKey, mergedItem.title)
