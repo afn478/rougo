@@ -1,5 +1,12 @@
 # Changelog
 
+## V2.7.5 - 2026-06-22
+
+- Imported YouTube playlists as library folders with videos grouped under them.
+- Added folder creation, rename, and move controls in the Library.
+- Added stream URL and subtitle parsing caches to reduce repeated media fetches.
+- Preserved playlist folder placement when a playlist video is downloaded locally.
+
 ## V2.7.4 - 2026-06-05
 
 - Added playback for repeat shadowing attempts and paused the source during attempt playback.
